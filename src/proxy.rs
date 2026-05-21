@@ -554,7 +554,11 @@ pub async fn handle_request(
         .unwrap_or(false);
 
     if is_stream {
-        handle_streaming_response(status, resp_headers, response, state, session_faker).await
+        if state.config.force_no_stream {
+            handle_streaming_as_regular(status, resp_headers, response, state, session_faker).await
+        } else {
+            handle_streaming_response(status, resp_headers, response, state, session_faker).await
+        }
     } else {
         handle_regular_response(status, resp_headers, response, state, session_faker).await
     }
@@ -748,6 +752,73 @@ async fn handle_regular_response(
     Ok(builder
         .body(full_body(Bytes::from(rehydrated_body)))
         .unwrap())
+}
+
+/// When force_no_stream is enabled but the upstream returns SSE anyway,
+/// buffer all raw bytes into one chunk, then rehydrate in a single pass.
+/// This eliminates chunk-boundary rehydration issues at the cost of
+/// delivering the full response only after the upstream finishes.
+async fn handle_streaming_as_regular(
+    status: reqwest::StatusCode,
+    resp_headers: reqwest::header::HeaderMap,
+    response: reqwest::Response,
+    state: Arc<ProxyState>,
+    faker: Arc<Faker>,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    let content_encoding = header_content_encoding(&resp_headers);
+    let is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
+
+    let mut raw = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                state.stats.add_response(bytes.len() as u64);
+                raw.extend_from_slice(&bytes);
+            }
+            Err(e) => {
+                warn!("Stream chunk error in buffered fallback: {}", e);
+                break;
+            }
+        }
+    }
+
+    let body = if raw.is_empty() || state.config.dry_run {
+        raw
+    } else if is_compressed {
+        match decompress_body(&raw, &content_encoding) {
+            Ok(decoded) => {
+                let text = String::from_utf8_lossy(&decoded);
+                if has_anthropic_thinking_signature(&text) {
+                    debug!("skipping rehydration for signed thinking response (compressed)");
+                    raw
+                } else {
+                    let rehydrated = faker.rehydrate(&text);
+                    match compress_body(rehydrated.as_bytes(), &content_encoding) {
+                        Ok(encoded) => encoded,
+                        Err(e) => {
+                            warn!("failed to re-compress rehydrated response: {}", e);
+                            raw
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("failed to decompress streaming response: {}", e);
+                raw
+            }
+        }
+    } else {
+        let text = String::from_utf8_lossy(&raw);
+        if has_anthropic_thinking_signature(&text) {
+            debug!("skipping rehydration for signed thinking response");
+            raw
+        } else {
+            faker.rehydrate(&text).into_bytes()
+        }
+    };
+
+    passthrough_response(status, resp_headers, body)
 }
 
 async fn handle_streaming_response(
