@@ -1137,6 +1137,7 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
 #[cfg(test)]
 mod tests {
     use super::{is_textual_content_type, should_skip_redaction_for_payload};
+    use serde_json::Value;
 
     #[test]
     fn non_text_data_url_is_skipped() {
@@ -1162,5 +1163,26 @@ mod tests {
         assert!(is_textual_content_type("text/plain"));
         assert!(!is_textual_content_type("application/pdf"));
         assert!(!is_textual_content_type("image/png"));
+    }
+
+    #[test]
+    fn force_no_stream_json_unchanged() {
+        let json: Value =
+            serde_json::from_str(r#"{"stream":true,"messages":[{"role":"user","content":"hello"}]}"#)
+                .unwrap();
+        let serialized = serde_json::to_vec(&json).unwrap();
+        let parsed: Value = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(parsed["stream"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn full_body_rehydration_resolves_boundary_splits() {
+        let full = "data: {\"text\": \"hello_world\"}\n\ndata: [DONE]\n\n";
+        let chunk_a = &full[..20];
+        let chunk_b = &full[20..];
+        let reconstructed = format!("{}{}", chunk_a, chunk_b);
+        assert_eq!(reconstructed, full);
+        assert!(reconstructed.contains("hello_world"));
+        assert!(reconstructed.contains("[DONE]"));
     }
 }
