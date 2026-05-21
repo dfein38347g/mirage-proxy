@@ -1136,8 +1136,8 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_textual_content_type, should_skip_redaction_for_payload};
-    use serde_json::Value;
+    use super::{is_textual_content_type, should_skip_redaction_for_payload, Faker};
+    use crate::redactor::PiiKind;
 
     #[test]
     fn non_text_data_url_is_skipped() {
@@ -1167,22 +1167,23 @@ mod tests {
 
     #[test]
     fn force_no_stream_json_unchanged() {
-        let json: Value =
-            serde_json::from_str(r#"{"stream":true,"messages":[{"role":"user","content":"hello"}]}"#)
-                .unwrap();
-        let serialized = serde_json::to_vec(&json).unwrap();
-        let parsed: Value = serde_json::from_slice(&serialized).unwrap();
-        assert_eq!(parsed["stream"].as_bool(), Some(true));
+        // Regression guard: rehydration is a no-op on text with no fakes
+        let faker = Faker::new(None, None);
+        let clean = r#"{"stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+        assert_eq!(faker.rehydrate(clean), clean);
     }
 
     #[test]
     fn full_body_rehydration_resolves_boundary_splits() {
-        let full = "data: {\"text\": \"hello_world\"}\n\ndata: [DONE]\n\n";
-        let chunk_a = &full[..20];
-        let chunk_b = &full[20..];
-        let reconstructed = format!("{}{}", chunk_a, chunk_b);
-        assert_eq!(reconstructed, full);
-        assert!(reconstructed.contains("hello_world"));
-        assert!(reconstructed.contains("[DONE]"));
+        // Regression guard: rehydration restores original PII from fakes
+        let faker = Faker::new(None, None);
+        let email = "user@example.com";
+        let fake = faker.fake(email, &PiiKind::Email);
+        let body = format!("data: {{\"text\": \"{}\"}}\n\ndata: [DONE]\n\n", fake);
+        let rehydrated = faker.rehydrate(&body);
+        assert_eq!(
+            rehydrated,
+            format!("data: {{\"text\": \"{}\"}}\n\ndata: [DONE]\n\n", email)
+        );
     }
 }
