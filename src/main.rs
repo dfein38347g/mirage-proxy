@@ -152,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     if args.list_providers {
+        let cfg = Config::load(args.config.as_deref());
         eprintln!();
         eprintln!(
             "  Built-in provider routes ({} providers)",
@@ -160,6 +161,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eprintln!("  ─────────────────────────────────────────────────");
         for p in providers::PROVIDERS {
             eprintln!("  {:16} {:14} → {}", p.name, p.prefix, p.upstream);
+        }
+        if !cfg.custom_providers.is_empty() {
+            eprintln!();
+            eprintln!(
+                "  Custom providers ({} providers):",
+                cfg.custom_providers.len()
+            );
+            for cp in &cfg.custom_providers {
+                eprintln!("  {:16} {:14} → {}", "custom", cp.prefix, cp.upstream);
+            }
         }
         eprintln!();
         return Ok(());
@@ -272,6 +283,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "           ... and {} more (--list-providers)",
         providers::PROVIDERS.len() - 4
     );
+    if !cfg.custom_providers.is_empty() {
+        eprintln!(
+            "  custom:  {} provider routes (--list-providers)",
+            cfg.custom_providers.len()
+        );
+    }
     if cfg.dry_run {
         eprintln!(
             "  mode:    \x1b[33mSHADOW\x1b[0m ({} sensitivity) — detections logged, traffic not modified",

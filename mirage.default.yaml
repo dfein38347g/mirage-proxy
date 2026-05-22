@@ -51,6 +51,20 @@ allowlist: []
 blocklist: []
   # - "*@personal.com"
 
+# Custom upstream API providers (OpenAI-compatible)
+# Define additional path prefix → upstream URL mappings.
+# Custom providers are checked before built-in providers.
+# Example:
+# custom_providers:
+#   - prefix: "/nanogpt"
+#     upstream: "https://nano-gpt.com/api/v1"
+#   - prefix: "/my-company"
+#     upstream: "https://gateway.mycompany.com/llm/v1"
+#
+# Then set your tool's base URL to http://127.0.0.1:8686/{prefix}
+# e.g., export OPENAI_BASE_URL=http://127.0.0.1:8686/nanogpt
+custom_providers: []
+
 # Audit log
 audit:
   enabled: true
