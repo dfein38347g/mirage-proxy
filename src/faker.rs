@@ -17,7 +17,7 @@ pub struct Faker {
 struct FakerMaps {
     forward: HashMap<String, String>,        // original -> fake
     reverse: HashMap<String, String>,        // fake -> original
-    custom_reverse: HashMap<String, String>, // substitute -> original (user-defined patterns, no length restriction)
+    custom_reverse: HashMap<String, String>, // substitute -> original (no length restriction)
     counter: usize,
 }
 
@@ -68,16 +68,16 @@ impl FakerMaps {
                 result = result.replace(fake, original);
             }
         }
-        // Custom pattern mappings (no length restriction — user explicitly defined these)
-        let mut custom_pairs: Vec<_> = self.custom_reverse.iter().collect();
-        custom_pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        for (substitute, original) in custom_pairs {
-            if substitute.chars().all(is_token_char) {
-                result = replace_token_bounded(&result, substitute, original);
+
+        // Apply custom pattern mappings (no minimum-length restriction)
+        for (fake, original) in &self.custom_reverse {
+            if fake.chars().all(is_token_char) {
+                result = replace_token_bounded(&result, fake, original);
             } else {
-                result = result.replace(substitute, original);
+                result = result.replace(fake, original);
             }
         }
+
         result
     }
 }
@@ -227,8 +227,8 @@ impl Faker {
     }
 
     /// Register a user-defined pattern substitution.
-    /// Unlike auto-generated fakes, these mappings bypass the minimum-length
-    /// rehydration guard (users explicitly choose the substitute).
+    /// These mappings bypass the minimum-length rehydration guard
+    /// since the user explicitly chose the substitute string.
     pub fn add_custom_mapping(&self, original: &str, substitute: &str) {
         let mut maps = self.maps.lock().unwrap();
         maps.forward
@@ -669,6 +669,58 @@ mod tests {
     }
 
     #[test]
+    fn test_ip_rehydrate_contiguous() {
+        // NOTE: fake_ip(1) always produces 47.53.71.98 (collision with the IP
+        // 47.53.71.98 itself). Using any other original avoids the collision:
+        // the first call gets n=1 → fake is always 47.53.71.98.
+        let faker = Faker::new(None, None);
+        let original = "192.168.1.100";
+        let fake = faker.fake(original, &PiiKind::IpAddress);
+        // The first IP always gets counter=1 → 47.53.71.98
+        assert_eq!(fake, "47.53.71.98");
+        assert_ne!(fake, original);
+
+        // When the fake appears contiguously at token boundaries, rehydration works
+        let text = format!("My IP is {}", fake);
+        let rehydrated = faker.rehydrate(&text);
+        assert_eq!(rehydrated, format!("My IP is {}", original));
+    }
+
+    #[test]
+    fn test_ip_rehydrate_sse_split() {
+        let faker = Faker::new(None, None);
+        let original = "10.0.0.1";
+        let fake = faker.fake(original, &PiiKind::IpAddress);
+        // First call → counter=1 → 47.53.71.98 (same as above since it starts a new Faker)
+        assert_eq!(fake, "47.53.71.98");
+
+        // Simulate buffered SSE body where the IP is split across delta.content fields.
+        // Even with --no-stream the full IP never appears contiguously in the raw body.
+        let sse_body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"The IP is {}\"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\".{}\"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\".{}\"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\".{}\"}}}}]}}\n\n\
+             data: [DONE]\n\n",
+            "47", "53", "71", "98"
+        );
+
+        let rehydrated = faker.rehydrate(&sse_body);
+
+        // The fake IP "47.53.71.98" does NOT appear contiguously in the body.
+        // Each octet/dot is in a separate delta.content field.
+        // rehydrate() finds no match — the fragments remain unreplaced.
+        assert!(rehydrated.contains("47"));
+        assert!(rehydrated.contains("53"));
+        assert!(rehydrated.contains("71"));
+        assert!(rehydrated.contains("98"));
+        assert!(
+            !rehydrated.contains(original),
+            "original should NOT appear — rehydration missed the split IP"
+        );
+    }
+
+    #[test]
     fn test_connection_string_protocol_preserved() {
         let faker = Faker::new(None, None);
         let conn = "mongodb+srv://admin:secret@cluster0.abc.mongodb.net/mydb";
@@ -717,6 +769,64 @@ mod tests {
         assert!(out.contains("file_path"));
         // real fake key still rehydrates
         assert!(out.contains("pscale_api_real.abc123"));
+    }
+
+    #[test]
+    fn test_custom_pattern_substitutes_and_rehydrates() {
+        let faker = Faker::new(None, None);
+        let original = "nathan";
+        let substitute = "john";
+
+        faker.add_custom_mapping(original, substitute);
+        let request_body = "My name is nathan and I work here";
+        let substituted = request_body.replace(original, substitute);
+        assert_eq!(substituted, "My name is john and I work here");
+
+        let response_body = "Hello john, welcome back";
+        let rehydrated = faker.rehydrate(response_body);
+        assert_eq!(rehydrated, "Hello nathan, welcome back");
+    }
+
+    #[test]
+    fn test_multiple_custom_patterns() {
+        let faker = Faker::new(None, None);
+
+        faker.add_custom_mapping("nathan", "john");
+        faker.add_custom_mapping("343-324", "000-000");
+
+        let text = "User nathan has id 343-324";
+        let substituted = text.replace("nathan", "john").replace("343-324", "000-000");
+        assert_eq!(substituted, "User john has id 000-000");
+
+        let response = "User john has id 000-000";
+        let rehydrated = faker.rehydrate(response);
+        assert_eq!(rehydrated, "User nathan has id 343-324");
+    }
+
+    #[test]
+    fn test_custom_pattern_short_substitute_rehydrates() {
+        let faker = Faker::new(None, None);
+
+        faker.add_custom_mapping("secret", "key");
+
+        let request = "The secret is safe";
+        let substituted = request.replace("secret", "key");
+        assert_eq!(substituted, "The key is safe");
+
+        let response = "The key is safe";
+        let rehydrated = faker.rehydrate(response);
+        assert_eq!(rehydrated, "The secret is safe");
+    }
+
+    #[test]
+    fn test_no_custom_match_passes_through() {
+        let faker = Faker::new(None, None);
+
+        faker.add_custom_mapping("something", "else");
+
+        let text = "This text has no matches";
+        let rehydrated = faker.rehydrate(text);
+        assert_eq!(rehydrated, text);
     }
 
     #[test]
