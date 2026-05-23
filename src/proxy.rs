@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::Frame;
 use hyper::{Request, Response, StatusCode};
+use regex::Regex;
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -20,15 +21,15 @@ use crate::stats::Stats;
 /// Decompress a body based on content-encoding
 fn decompress_body(data: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
     match encoding {
-        "zstd" => {
-            zstd::decode_all(std::io::Cursor::new(data))
-                .map_err(|e| format!("zstd decode error: {}", e))
-        }
+        "zstd" => zstd::decode_all(std::io::Cursor::new(data))
+            .map_err(|e| format!("zstd decode error: {}", e)),
         "gzip" => {
             use std::io::Read;
             let mut decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(data));
             let mut buf = Vec::new();
-            decoder.read_to_end(&mut buf).map_err(|e| format!("gzip decode error: {}", e))?;
+            decoder
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("gzip decode error: {}", e))?;
             Ok(buf)
         }
         other => Err(format!("unsupported encoding: {}", other)),
@@ -38,18 +39,28 @@ fn decompress_body(data: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
 /// Compress a body back to the specified encoding
 fn compress_body(data: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
     match encoding {
-        "zstd" => {
-            zstd::encode_all(std::io::Cursor::new(data), 3)
-                .map_err(|e| format!("zstd encode error: {}", e))
-        }
+        "zstd" => zstd::encode_all(std::io::Cursor::new(data), 3)
+            .map_err(|e| format!("zstd encode error: {}", e)),
         "gzip" => {
             use std::io::Write;
-            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            encoder.write_all(data).map_err(|e| format!("gzip encode error: {}", e))?;
-            encoder.finish().map_err(|e| format!("gzip finish error: {}", e))
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder
+                .write_all(data)
+                .map_err(|e| format!("gzip encode error: {}", e))?;
+            encoder
+                .finish()
+                .map_err(|e| format!("gzip finish error: {}", e))
         }
         other => Err(format!("unsupported encoding: {}", other)),
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledCustomPattern {
+    pub name: String,
+    pub regex: Regex,
+    pub substitute: String,
 }
 
 pub struct ProxyState {
@@ -64,14 +75,14 @@ pub struct ProxyState {
     /// detect() will still flag these but smart_redact will skip substitution.
     /// Session-scoped: cleared on daemon restart.
     pub flagged_originals: Mutex<HashSet<String>>,
+    /// Custom user-defined regex patterns compiled at startup
+    pub custom_patterns: Vec<CompiledCustomPattern>,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
 fn full_body(data: Bytes) -> BoxBody {
-    Full::new(data)
-        .map_err(|never| match never {})
-        .boxed()
+    Full::new(data).map_err(|never| match never {}).boxed()
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response<BoxBody> {
@@ -132,10 +143,7 @@ fn why_response(path_and_query: &str, state: &ProxyState) -> Response<BoxBody> {
     let decoy = match parse_decoy_param(path_and_query) {
         Some(d) if !d.is_empty() => d,
         _ => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "missing ?decoy=<value>",
-            );
+            return error_response(StatusCode::BAD_REQUEST, "missing ?decoy=<value>");
         }
     };
 
@@ -258,8 +266,13 @@ async fn forward_request(
     faker: Arc<Faker>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let is_chatgpt = headers.contains_key("chatgpt-account-id");
-    let (target_url, _) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(path, is_chatgpt) {
-        (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
+    let (target_url, _) = if let Some((upstream, remaining)) =
+        crate::providers::resolve_provider(path, is_chatgpt)
+    {
+        (
+            format!("{}{}", upstream.trim_end_matches('/'), remaining),
+            remaining,
+        )
     } else {
         return Ok(error_response(
             StatusCode::BAD_GATEWAY,
@@ -267,13 +280,21 @@ async fn forward_request(
         ));
     };
 
-    debug!("▶ fast-forward {} {} → {} ({} bytes, no inspection)", method, path, target_url, body.len());
+    debug!(
+        "▶ fast-forward {} {} → {} ({} bytes, no inspection)",
+        method,
+        path,
+        target_url,
+        body.len()
+    );
 
     let mut forward = state.client.request(method.clone(), &target_url);
     for (name, value) in headers.iter() {
         let name_str = name.as_str().to_lowercase();
         match name_str.as_str() {
-            "host" | "connection" | "transfer-encoding" | "content-length" | "accept-encoding" => continue,
+            "host" | "connection" | "transfer-encoding" | "content-length" | "accept-encoding" => {
+                continue
+            }
             _ => {
                 if let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
                     if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_ref()) {
@@ -291,16 +312,28 @@ async fn forward_request(
         Ok(resp) => resp,
         Err(e) => {
             warn!("Upstream request failed: {}", e);
-            return Ok(error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {}", e)));
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {}", e),
+            ));
         }
     };
 
     let status = response.status();
     let resp_headers = response.headers().clone();
-    let ct = resp_headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("none");
-    debug!("← {} {} ({})", status.as_u16(), status.canonical_reason().unwrap_or(""), ct);
+    let ct = resp_headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none");
+    debug!(
+        "← {} {} ({})",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or(""),
+        ct
+    );
 
-    let is_stream = resp_headers.get("content-type")
+    let is_stream = resp_headers
+        .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|ct| ct.contains("text/event-stream"))
         .unwrap_or(false);
@@ -318,7 +351,12 @@ pub async fn handle_request(
     state: Arc<ProxyState>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().clone();
-    let path = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
     let headers = req.headers().clone();
 
     if path == "/healthz" {
@@ -338,7 +376,7 @@ pub async fn handle_request(
         // Mask auth values in debug but show the header name and first/last chars
         if n == "authorization" || n == "x-api-key" || n == "openai-organization" {
             let masked = if v.len() > 12 {
-                format!("{}...{}", &v[..8], &v[v.len()-4..])
+                format!("{}...{}", &v[..8], &v[v.len() - 4..])
             } else {
                 "***".to_string()
             };
@@ -353,7 +391,10 @@ pub async fn handle_request(
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
             warn!("Failed to read request body: {}", e);
-            return Ok(error_response(StatusCode::BAD_REQUEST, "Failed to read request body"));
+            return Ok(error_response(
+                StatusCode::BAD_REQUEST,
+                "Failed to read request body",
+            ));
         }
     };
 
@@ -367,7 +408,10 @@ pub async fn handle_request(
 
     // Never inspect binary request payloads (multipart, images, PDFs, etc).
     // Forward as-is to avoid corruption.
-    if !body_bytes.is_empty() && !request_content_type.is_empty() && !is_textual_content_type(&request_content_type) {
+    if !body_bytes.is_empty()
+        && !request_content_type.is_empty()
+        && !is_textual_content_type(&request_content_type)
+    {
         debug!(
             "body is non-text content-type ({}), forwarding without inspection",
             request_content_type
@@ -388,25 +432,38 @@ pub async fn handle_request(
     }
 
     // Check for compressed body (zstd, gzip, etc.) — decompress for inspection, forward original
-    let content_encoding = headers.get("content-encoding")
+    let content_encoding = headers
+        .get("content-encoding")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
     let is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
 
     let inspect_bytes = if is_compressed {
-        debug!("body is compressed ({}), {} bytes — decompressing for inspection", content_encoding, body_bytes.len());
+        debug!(
+            "body is compressed ({}), {} bytes — decompressing for inspection",
+            content_encoding,
+            body_bytes.len()
+        );
         match decompress_body(&body_bytes, &content_encoding) {
             Ok(decompressed) => {
-                debug!("decompressed: {} bytes → {} bytes", body_bytes.len(), decompressed.len());
+                debug!(
+                    "decompressed: {} bytes → {} bytes",
+                    body_bytes.len(),
+                    decompressed.len()
+                );
                 decompressed
             }
             Err(e) => {
-                warn!("failed to decompress {} body: {} — forwarding as-is without inspection", content_encoding, e);
+                warn!(
+                    "failed to decompress {} body: {} — forwarding as-is without inspection",
+                    content_encoding, e
+                );
                 // Can't inspect, just forward original
                 let (_, faker) = state.sessions.get_faker("default");
                 // Skip to forwarding
-                return forward_request(method, &path, &headers, body_bytes.to_vec(), state, faker).await;
+                return forward_request(method, &path, &headers, body_bytes.to_vec(), state, faker)
+                    .await;
             }
         }
     } else {
@@ -429,11 +486,20 @@ pub async fn handle_request(
                 redact_json_value(&mut json, &state, &faker);
                 if is_compressed {
                     // Re-compress redacted JSON back to original encoding
-                    let redacted_json = serde_json::to_vec(&json).unwrap_or_else(|_| inspect_bytes.clone());
-                    debug!("re-compressing redacted body ({} bytes) with {}", redacted_json.len(), content_encoding);
+                    let redacted_json =
+                        serde_json::to_vec(&json).unwrap_or_else(|_| inspect_bytes.clone());
+                    debug!(
+                        "re-compressing redacted body ({} bytes) with {}",
+                        redacted_json.len(),
+                        content_encoding
+                    );
                     match compress_body(&redacted_json, &content_encoding) {
                         Ok(compressed) => {
-                            debug!("re-compressed: {} bytes → {} bytes", redacted_json.len(), compressed.len());
+                            debug!(
+                                "re-compressed: {} bytes → {} bytes",
+                                redacted_json.len(),
+                                compressed.len()
+                            );
                             (compressed, faker)
                         }
                         Err(e) => {
@@ -442,11 +508,18 @@ pub async fn handle_request(
                         }
                     }
                 } else {
-                    (serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()), faker)
+                    (
+                        serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()),
+                        faker,
+                    )
                 }
             }
             Err(e) => {
-                debug!("body is not valid JSON: {} — treating as text ({} bytes)", e, inspect_bytes.len());
+                debug!(
+                    "body is not valid JSON: {} — treating as text ({} bytes)",
+                    e,
+                    inspect_bytes.len()
+                );
                 let (_, faker) = state.sessions.get_faker("default");
                 let text = String::from_utf8_lossy(&inspect_bytes);
                 let redacted = smart_redact(&text, &state, &faker);
@@ -473,8 +546,13 @@ pub async fn handle_request(
 
     // Resolve provider
     let is_chatgpt = headers.contains_key("chatgpt-account-id");
-    let (target_url, forward_path) = if let Some((upstream, remaining)) = crate::providers::resolve_provider(&path, is_chatgpt) {
-        (format!("{}{}", upstream.trim_end_matches('/'), remaining), remaining)
+    let (target_url, forward_path) = if let Some((upstream, remaining)) =
+        crate::providers::resolve_provider(&path, is_chatgpt)
+    {
+        (
+            format!("{}{}", upstream.trim_end_matches('/'), remaining),
+            remaining,
+        )
     } else {
         warn!("No provider matched for path: {}", path);
         return Ok(error_response(
@@ -485,7 +563,11 @@ pub async fn handle_request(
     let _ = forward_path; // used for clarity, target_url has the full URL
 
     debug!("▶ forwarding {} {} → {}", method, path, target_url);
-    debug!("  forward body: {} bytes (compressed: {})", forward_body.len(), is_compressed);
+    debug!(
+        "  forward body: {} bytes (compressed: {})",
+        forward_body.len(),
+        is_compressed
+    );
 
     let mut forward = state.client.request(method.clone(), &target_url);
 
@@ -500,10 +582,16 @@ pub async fn handle_request(
             _ => {
                 if let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
                     if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_ref()) {
-                        forwarded_headers.push(format!("{}: {}", name_str,
+                        forwarded_headers.push(format!(
+                            "{}: {}",
+                            name_str,
                             if name_str == "authorization" || name_str == "x-api-key" {
                                 let val = value.to_str().unwrap_or("***");
-                                if val.len() > 12 { format!("{}...{}", &val[..8], &val[val.len()-4..]) } else { "***".to_string() }
+                                if val.len() > 12 {
+                                    format!("{}...{}", &val[..8], &val[val.len() - 4..])
+                                } else {
+                                    "***".to_string()
+                                }
                             } else {
                                 value.to_str().unwrap_or("<binary>").to_string()
                             }
@@ -536,14 +624,26 @@ pub async fn handle_request(
 
     let status = response.status();
     let resp_headers = response.headers().clone();
-    let ct = resp_headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("none");
-    debug!("← {} {} ({})", status.as_u16(), status.canonical_reason().unwrap_or(""), ct);
+    let ct = resp_headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none");
+    debug!(
+        "← {} {} ({})",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or(""),
+        ct
+    );
 
     // Log full response body on error for diagnosis
     if status.as_u16() >= 400 {
         debug!("  ← response headers:");
         for (name, value) in resp_headers.iter() {
-            debug!("    {}: {}", name.as_str(), value.to_str().unwrap_or("<binary>"));
+            debug!(
+                "    {}: {}",
+                name.as_str(),
+                value.to_str().unwrap_or("<binary>")
+            );
         }
     }
 
@@ -600,7 +700,12 @@ fn should_skip_redaction_for_payload(text: &str) -> bool {
         if let Some((meta, _payload)) = rest.split_once(',') {
             let has_base64 = meta.split(';').any(|p| p.eq_ignore_ascii_case("base64"));
             if has_base64 {
-                let mime = meta.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                let mime = meta
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
                 let is_text_data = mime.starts_with("text/")
                     || mime == "application/json"
                     || mime.ends_with("+json")
@@ -678,7 +783,11 @@ async fn handle_regular_response(
     // Log error response bodies for debugging
     if status.as_u16() >= 400 {
         let body_preview = String::from_utf8_lossy(&body_bytes);
-        let preview = if body_preview.len() > 2000 { &body_preview[..2000] } else { &body_preview };
+        let preview = if body_preview.len() > 2000 {
+            &body_preview[..2000]
+        } else {
+            &body_preview
+        };
         debug!("  ← error body: {}", preview);
     }
 
@@ -688,7 +797,10 @@ async fn handle_regular_response(
     // - For compressed responses: decompress -> rehydrate -> recompress
     let response_content_type = header_content_type(&resp_headers);
     if !response_content_type.is_empty() && !is_textual_content_type(&response_content_type) {
-        debug!("response is non-text content-type ({}), skipping rehydration", response_content_type);
+        debug!(
+            "response is non-text content-type ({}), skipping rehydration",
+            response_content_type
+        );
         return passthrough_response(status, resp_headers, body_bytes.to_vec());
     }
 
@@ -715,7 +827,10 @@ async fn handle_regular_response(
                     }
                 }
                 Err(e) => {
-                    warn!("failed to decompress response body (content-encoding={}): {}", content_encoding, e);
+                    warn!(
+                        "failed to decompress response body (content-encoding={}): {}",
+                        content_encoding, e
+                    );
                     body_bytes.to_vec()
                 }
             }
@@ -882,7 +997,10 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
         // high-entropy strings) demote to Warn at low/medium sensitivity.
         // High and Paranoid sensitivity keep aggressive substitution.
         if entity.confidence == Confidence::Low
-            && matches!(state.config.sensitivity, Sensitivity::Low | Sensitivity::Medium)
+            && matches!(
+                state.config.sensitivity,
+                Sensitivity::Low | Sensitivity::Medium
+            )
             && matches!(action, RedactAction::Redact | RedactAction::Mask)
         {
             action = RedactAction::Warn;
@@ -902,13 +1020,19 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
         // Global dedup: check if we've ever seen this exact value
         let is_new = {
             let mut seen = state.seen_pii.lock().unwrap();
-            seen.insert(entity.original.clone())  // returns true if newly inserted
+            seen.insert(entity.original.clone()) // returns true if newly inserted
         };
 
         // Only audit-log and count genuinely new detections
         if is_new {
             if let Some(ref audit) = state.audit_log {
-                audit.log(label, &action, &entity.original, text, entity.confidence.score());
+                audit.log(
+                    label,
+                    &action,
+                    &entity.original,
+                    text,
+                    entity.confidence.score(),
+                );
             }
         }
 
@@ -925,7 +1049,10 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
                         label.to_string()
                     };
                     let char_count = entity.original.len();
-                    eprint!("\r\x1b[2K  🛡️  {} [{} chars] → {}\n", detail, char_count, preview);
+                    eprint!(
+                        "\r\x1b[2K  🛡️  {} [{} chars] → {}\n",
+                        detail, char_count, preview
+                    );
                     new_redaction_count += 1;
                 }
             }
@@ -938,11 +1065,29 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
                         label.to_string()
                     };
                     let char_count = entity.original.len();
-                    eprint!("\r\x1b[2K  ⚠️  {} (warn) [{} chars] → {}\n", detail, char_count, preview);
+                    eprint!(
+                        "\r\x1b[2K  ⚠️  {} (warn) [{} chars] → {}\n",
+                        detail, char_count, preview
+                    );
                 }
             }
             RedactAction::Ignore => {}
         }
+    }
+
+    // Custom pattern substitution (after built-in detection, cumulatively)
+    let mut custom_redacted = false;
+    for cp in &state.custom_patterns {
+        let current = result.clone();
+        for m in cp.regex.find_iter(&current) {
+            let original = m.as_str();
+            faker.add_custom_mapping(original, &cp.substitute);
+            result = result.replace(original, &cp.substitute);
+            custom_redacted = true;
+        }
+    }
+    if custom_redacted {
+        new_redaction_count += 1;
     }
 
     if new_redaction_count > 0 {
@@ -958,7 +1103,7 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
         // Mask middle: show first 4 and last 4 chars
         if s.len() > 10 {
             let start = &s[..4];
-            let end = &s[s.len()-4..];
+            let end = &s[s.len() - 4..];
             format!("{}•••{}", start, end)
         } else {
             format!("{}•••", &s[..s.len().min(3)])
@@ -974,31 +1119,76 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
 /// Auth, config, IDs, metadata — anything that isn't user content.
 const SKIP_REDACT_KEYS: &[&str] = &[
     // Auth
-    "api_key", "apikey", "api-key", "api_secret",
-    "authorization", "auth", "token", "bearer",
-    "x-api-key", "x_api_key",
-    "secret_key", "secret", "credentials",
-    "access_token", "refresh_token",
-    "session_token", "session_key", "session_id",
+    "api_key",
+    "apikey",
+    "api-key",
+    "api_secret",
+    "authorization",
+    "auth",
+    "token",
+    "bearer",
+    "x-api-key",
+    "x_api_key",
+    "secret_key",
+    "secret",
+    "credentials",
+    "access_token",
+    "refresh_token",
+    "session_token",
+    "session_key",
+    "session_id",
     // Model/provider config
-    "model", "stream", "max_tokens", "temperature",
-    "top_p", "top_k", "stop", "seed",
-    "anthropic-version", "anthropic_version",
-    "openai-organization", "openai_organization",
+    "model",
+    "stream",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stop",
+    "seed",
+    "anthropic-version",
+    "anthropic_version",
+    "openai-organization",
+    "openai_organization",
     // IDs and references (can look like high-entropy secrets)
-    "id", "object", "type", "role", "name",
-    "previous_response_id", "response_id",
-    "message_id", "conversation_id", "thread_id",
-    "run_id", "assistant_id", "file_id", "batch_id",
-    "tool_call_id", "tool_use_id",
+    "id",
+    "object",
+    "type",
+    "role",
+    "name",
+    "previous_response_id",
+    "response_id",
+    "message_id",
+    "conversation_id",
+    "thread_id",
+    "run_id",
+    "assistant_id",
+    "file_id",
+    "batch_id",
+    "tool_call_id",
+    "tool_use_id",
     // Cryptographic / signed envelopes (must remain byte-exact)
-    "signature", "encrypted_content", "encrypted_input", "ciphertext",
-    "proof", "attestation", "nonce", "iv", "tag", "mac",
+    "signature",
+    "encrypted_content",
+    "encrypted_input",
+    "ciphertext",
+    "proof",
+    "attestation",
+    "nonce",
+    "iv",
+    "tag",
+    "mac",
     // Request structure
-    "tool_choice", "response_format", "format",
-    "encoding_format", "modalities",
-    "truncation", "store", "metadata",
-    "service_tier", "user",
+    "tool_choice",
+    "response_format",
+    "format",
+    "encoding_format",
+    "modalities",
+    "truncation",
+    "store",
+    "metadata",
+    "service_tier",
+    "user",
     // mirage internal
     "mirage_session",
 ];
@@ -1006,9 +1196,17 @@ const SKIP_REDACT_KEYS: &[&str] = &[
 /// Keys whose VALUES are user content and SHOULD be redacted.
 /// Everything else in the object is skipped — we only recurse into these.
 const CONTENT_KEYS: &[&str] = &[
-    "content", "text", "messages", "system", "input",
-    "instructions", "description", "prompt",
-    "tools", "tool_results", "tool_result",
+    "content",
+    "text",
+    "messages",
+    "system",
+    "input",
+    "instructions",
+    "description",
+    "prompt",
+    "tools",
+    "tool_results",
+    "tool_result",
 ];
 
 fn should_skip_key(key: &str) -> bool {
@@ -1022,9 +1220,14 @@ fn should_skip_key(key: &str) -> bool {
         return true;
     }
     // For unknown keys: skip if the key name suggests it's an ID or config
-    lower.ends_with("_id") || lower.ends_with("_key") || lower.ends_with("_token")
-        || lower.ends_with("_secret") || lower.ends_with("_url") || lower.ends_with("_uri")
-        || lower.starts_with("x-") || lower.starts_with("x_")
+    lower.ends_with("_id")
+        || lower.ends_with("_key")
+        || lower.ends_with("_token")
+        || lower.ends_with("_secret")
+        || lower.ends_with("_url")
+        || lower.ends_with("_uri")
+        || lower.starts_with("x-")
+        || lower.starts_with("x_")
 }
 
 fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
@@ -1065,7 +1268,16 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_textual_content_type, should_skip_redaction_for_payload};
+    use super::{
+        is_textual_content_type, should_skip_redaction_for_payload, smart_redact, ProxyState,
+    };
+    use crate::config::Config;
+    use crate::faker::Faker;
+    use crate::session::SessionManager;
+    use crate::stats::Stats;
+    use regex::Regex;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
 
     #[test]
     fn non_text_data_url_is_skipped() {
@@ -1091,5 +1303,55 @@ mod tests {
         assert!(is_textual_content_type("text/plain"));
         assert!(!is_textual_content_type("application/pdf"));
         assert!(!is_textual_content_type("image/png"));
+    }
+
+    #[test]
+    fn custom_pattern_substitutes_in_request_text() {
+        let faker = Faker::new(None, None);
+        let text = "my name is nathan and I work at nathan corp";
+        let re = Regex::new(r"\bnathan\b").unwrap();
+        let mut result = text.to_string();
+        for m in re.find_iter(&result.clone()) {
+            faker.add_custom_mapping(m.as_str(), "john");
+            result = result.replace(m.as_str(), "john");
+        }
+        assert_eq!(result, "my name is john and I work at john corp");
+    }
+
+    #[test]
+    fn custom_pattern_rehydrates_response() {
+        let faker = Faker::new(None, None);
+        faker.add_custom_mapping("nathan", "john");
+        let response = "Hello john, welcome back";
+        let rehydrated = faker.rehydrate(response);
+        assert_eq!(rehydrated, "Hello nathan, welcome back");
+    }
+
+    #[test]
+    fn custom_pattern_no_match_passes_through() {
+        let state = ProxyState {
+            client: reqwest::Client::new(),
+            sessions: SessionManager::new(None),
+            config: Config::load(Some("nonexistent.yaml")),
+            audit_log: None,
+            stats: Stats::new(),
+            seen_pii: Mutex::new(HashSet::new()),
+            flagged_originals: Mutex::new(HashSet::new()),
+            custom_patterns: vec![],
+        };
+        let faker = Faker::new(None, None);
+        let text = "this text has no matches at all";
+        let result = smart_redact(text, &state, &faker);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn custom_pattern_short_substitute_rehydrates() {
+        let faker = Faker::new(None, None);
+        // User-defined pattern: \bnathan\b -> "john" (4 chars, below the 6-char minimum)
+        faker.add_custom_mapping("nathan", "john");
+        let response = "Hello john, welcome back";
+        let rehydrated = faker.rehydrate(response);
+        assert_eq!(rehydrated, "Hello nathan, welcome back");
     }
 }

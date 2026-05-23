@@ -28,6 +28,8 @@ pub struct Config {
     pub dry_run: bool,
     #[serde(default)]
     pub update_check: UpdateCheckConfig,
+    #[serde(default)]
+    pub custom_patterns: Vec<CustomPatternConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -185,6 +187,7 @@ impl Config {
             audit: AuditConfig::default(),
             dry_run: false,
             update_check: UpdateCheckConfig::default(),
+            custom_patterns: vec![],
         }
     }
 
@@ -227,6 +230,13 @@ impl Config {
             _ => RedactAction::Ignore,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomPatternConfig {
+    pub name: String,
+    pub pattern: String,
+    pub substitute: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

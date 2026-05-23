@@ -100,10 +100,9 @@ impl PiiKind {
             | PiiKind::PrivateKey
             | PiiKind::ConnectionString => Confidence::High,
             // Useful but more prone to false-positive in arbitrary text.
-            PiiKind::GenericApiKey
-            | PiiKind::BearerToken
-            | PiiKind::Email
-            | PiiKind::Phone => Confidence::Medium,
+            PiiKind::GenericApiKey | PiiKind::BearerToken | PiiKind::Email | PiiKind::Phone => {
+                Confidence::Medium
+            }
             // Shape-only heuristics.
             PiiKind::IpAddress | PiiKind::HighEntropy => Confidence::Low,
         }
@@ -116,20 +115,59 @@ struct PatternDef {
 }
 
 static PATTERN_DEFS: &[PatternDef] = &[
-    PatternDef { kind: PiiKind::Email, pattern: r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" },
-    PatternDef { kind: PiiKind::Phone, pattern: r"\+\d{1,3}[-.\s]?\d[\d\-.\s]{6,14}\d" },
+    PatternDef {
+        kind: PiiKind::Email,
+        pattern: r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+    },
+    PatternDef {
+        kind: PiiKind::Phone,
+        pattern: r"\+\d{1,3}[-.\s]?\d[\d\-.\s]{6,14}\d",
+    },
     // US format: require separators, parens, or +1 prefix to avoid matching bare digit strings (timestamps, IDs)
-    PatternDef { kind: PiiKind::Phone, pattern: r"(?:\+1[-.\s]?)\d{3}[-.\s]?\d{3}[-.\s]?\d{4}" },
-    PatternDef { kind: PiiKind::Phone, pattern: r"\(?\d{3}\)[-.\s]\d{3}[-.\s]?\d{4}" },
-    PatternDef { kind: PiiKind::CreditCard, pattern: r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b" },
-    PatternDef { kind: PiiKind::Ssn, pattern: r"\b\d{3}-\d{2}-\d{4}\b" },
-    PatternDef { kind: PiiKind::IpAddress, pattern: r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b" },
-    PatternDef { kind: PiiKind::AwsKey, pattern: r"\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b" },
-    PatternDef { kind: PiiKind::GithubToken, pattern: r"\b(?:ghp|ghs|gho|ghu|ghr)_[a-zA-Z0-9]{36,}\b" },
-    PatternDef { kind: PiiKind::GenericApiKey, pattern: r"\b(?:sk-[a-zA-Z0-9]{20,}|sk-proj-[a-zA-Z0-9_-]{20,}|xox[boaprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b" },
-    PatternDef { kind: PiiKind::BearerToken, pattern: r"(?i)Bearer\s+[a-zA-Z0-9._~+/=-]{20,}" },
-    PatternDef { kind: PiiKind::ConnectionString, pattern: r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://\S+" },
-    PatternDef { kind: PiiKind::PrivateKey, pattern: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----.+?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----" },
+    PatternDef {
+        kind: PiiKind::Phone,
+        pattern: r"(?:\+1[-.\s]?)\d{3}[-.\s]?\d{3}[-.\s]?\d{4}",
+    },
+    PatternDef {
+        kind: PiiKind::Phone,
+        pattern: r"\(?\d{3}\)[-.\s]\d{3}[-.\s]?\d{4}",
+    },
+    PatternDef {
+        kind: PiiKind::CreditCard,
+        pattern: r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
+    },
+    PatternDef {
+        kind: PiiKind::Ssn,
+        pattern: r"\b\d{3}-\d{2}-\d{4}\b",
+    },
+    PatternDef {
+        kind: PiiKind::IpAddress,
+        pattern: r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b",
+    },
+    PatternDef {
+        kind: PiiKind::AwsKey,
+        pattern: r"\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b",
+    },
+    PatternDef {
+        kind: PiiKind::GithubToken,
+        pattern: r"\b(?:ghp|ghs|gho|ghu|ghr)_[a-zA-Z0-9]{36,}\b",
+    },
+    PatternDef {
+        kind: PiiKind::GenericApiKey,
+        pattern: r"\b(?:sk-[a-zA-Z0-9]{20,}|sk-proj-[a-zA-Z0-9_-]{20,}|xox[boaprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b",
+    },
+    PatternDef {
+        kind: PiiKind::BearerToken,
+        pattern: r"(?i)Bearer\s+[a-zA-Z0-9._~+/=-]{20,}",
+    },
+    PatternDef {
+        kind: PiiKind::ConnectionString,
+        pattern: r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://\S+",
+    },
+    PatternDef {
+        kind: PiiKind::PrivateKey,
+        pattern: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----.+?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+    },
 ];
 
 static COMPILED_PATTERNS: Lazy<Vec<(PiiKind, Option<&'static str>, Regex)>> = Lazy::new(|| {
@@ -167,16 +205,14 @@ fn shannon_entropy(s: &str) -> f64 {
     })
 }
 
-static HIGH_ENTROPY_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[a-zA-Z0-9+/=_-]{32,}").unwrap());
+static HIGH_ENTROPY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[a-zA-Z0-9+/=_-]{32,}").unwrap());
 
 // Shapes that look high-entropy but must never be substituted.
 // Substituting any of these breaks downstream verification or hashing.
 //
 // JWT: three base64url segments separated by dots; the third is a signature.
-static JWT_SHAPE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$").unwrap()
-});
+static JWT_SHAPE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$").unwrap());
 // SHA-256 / SHA-512 hex digests (commonly appear in lockfiles, integrity fields, content hashes).
 static HEX_DIGEST_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-fA-F0-9]{64}$|^[a-fA-F0-9]{128}$").unwrap());
@@ -203,9 +239,9 @@ pub struct TokenMap {
 #[cfg(test)]
 #[derive(Debug)]
 struct TokenMapInner {
-    forward: HashMap<String, String>,  // original -> token
-    reverse: HashMap<String, String>,  // token -> original
-    counters: HashMap<String, usize>,  // kind_label -> next index
+    forward: HashMap<String, String>, // original -> token
+    reverse: HashMap<String, String>, // token -> original
+    counters: HashMap<String, usize>, // kind_label -> next index
 }
 
 #[cfg(test)]
@@ -229,7 +265,12 @@ impl TokenMap {
         let label = kind.label();
         let counter = map.counters.entry(label.to_string()).or_insert(0);
         *counter += 1;
-        let token = format!("[{}_{}_{}]", label, counter, &Uuid::new_v4().to_string()[..8]);
+        let token = format!(
+            "[{}_{}_{}]",
+            label,
+            counter,
+            &Uuid::new_v4().to_string()[..8]
+        );
         map.forward.insert(original.to_string(), token.clone());
         map.reverse.insert(token.clone(), original.to_string());
         token
@@ -301,9 +342,9 @@ pub fn detect(text: &str) -> Vec<PiiEntity> {
     entities.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     let mut deduped: Vec<PiiEntity> = Vec::new();
     for entity in entities {
-        let overlaps = deduped.iter().any(|e| {
-            entity.start < e.end && entity.end > e.start
-        });
+        let overlaps = deduped
+            .iter()
+            .any(|e| entity.start < e.end && entity.end > e.start);
         if !overlaps {
             deduped.push(entity);
         }
@@ -422,7 +463,11 @@ mod tests {
         // breaks signature verification. Must pass through unchanged.
         let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
         let entities = detect(jwt);
-        assert!(entities.is_empty(), "JWT shape leaked through: {:?}", entities);
+        assert!(
+            entities.is_empty(),
+            "JWT shape leaked through: {:?}",
+            entities
+        );
     }
 
     #[test]
@@ -438,7 +483,11 @@ mod tests {
         // npm/pnpm package-lock.json integrity values must remain byte-exact.
         let sri = "sha512-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789==";
         let entities = detect(sri);
-        assert!(entities.is_empty(), "SRI integrity leaked through: {:?}", entities);
+        assert!(
+            entities.is_empty(),
+            "SRI integrity leaked through: {:?}",
+            entities
+        );
     }
 
     #[test]
@@ -453,8 +502,9 @@ mod tests {
     fn email_is_medium_confidence() {
         let email = ["alice", "@", "example.com"].join("");
         let entities = detect(&email);
-        assert!(entities.iter().any(|e| e.kind == PiiKind::Email
-            && e.confidence == Confidence::Medium));
+        assert!(entities
+            .iter()
+            .any(|e| e.kind == PiiKind::Email && e.confidence == Confidence::Medium));
     }
 
     #[test]

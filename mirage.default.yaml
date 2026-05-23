@@ -65,3 +65,15 @@ dry_run: false
 update_check:
   enabled: true
   timeout_ms: 1200      # network timeout (check runs in background)
+
+# Custom pattern definitions
+# Define regex patterns to detect and substitute with replacement strings.
+# Mappings are stored in the session faker for response rehydration.
+# Example:
+# custom_patterns:
+#   - name: "MY_NAME"
+#     pattern: "\\bnathan\\b"
+#     substitute: "john"
+#   - name: "WORK_ID"
+#     pattern: "\\b343-324\\b"
+#     substitute: "000-000"

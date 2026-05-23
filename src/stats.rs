@@ -55,7 +55,9 @@ impl Stats {
 
         format!(
             "{}h {}m {}s │ {} reqs │ {} redacted │ {} sessions │ ↑{} ↓{}",
-            hours, mins, secs,
+            hours,
+            mins,
+            secs,
             reqs,
             redactions,
             sessions,
