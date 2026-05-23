@@ -882,6 +882,12 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
     let mut full_content = String::new();
     let mut content_indices: Vec<usize> = Vec::new();
     let mut content_jsons: Vec<String> = Vec::new();
+    let mut full_reasoning = String::new();
+    let mut reasoning_indices: Vec<usize> = Vec::new();
+    let mut reasoning_jsons: Vec<String> = Vec::new();
+    let mut full_reasoning_content = String::new();
+    let mut reasoning_content_indices: Vec<usize> = Vec::new();
+    let mut reasoning_content_jsons: Vec<String> = Vec::new();
 
     for event in &events {
         if event.is_empty() {
@@ -902,6 +908,20 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
                             content_jsons.push(data_str.to_string());
                         }
                     }
+                    if let Some(reasoning) = val["choices"][0]["delta"]["reasoning"].as_str() {
+                        if !reasoning.is_empty() {
+                            full_reasoning.push_str(reasoning);
+                            reasoning_indices.push(out_events.len());
+                            reasoning_jsons.push(data_str.to_string());
+                        }
+                    }
+                    if let Some(rc) = val["choices"][0]["delta"]["reasoning_content"].as_str() {
+                        if !rc.is_empty() {
+                            full_reasoning_content.push_str(rc);
+                            reasoning_content_indices.push(out_events.len());
+                            reasoning_content_jsons.push(data_str.to_string());
+                        }
+                    }
                     out_events.push(event.to_string());
                 }
                 Err(_) => {
@@ -913,27 +933,67 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
         }
     }
 
-    if content_indices.is_empty() {
+    let has_content = !content_indices.is_empty();
+    let has_reasoning = !reasoning_indices.is_empty();
+    let has_reasoning_content = !reasoning_content_indices.is_empty();
+
+    if !has_content && !has_reasoning && !has_reasoning_content {
         return text;
     }
 
-    let rehydrated = faker.rehydrate(&full_content);
+    let rehydrated_content = if has_content { faker.rehydrate(&full_content) } else { String::new() };
+    let rehydrated_reasoning = if has_reasoning { faker.rehydrate(&full_reasoning) } else { String::new() };
+    let rehydrated_reasoning_content = if has_reasoning_content { faker.rehydrate(&full_reasoning_content) } else { String::new() };
 
-    // Return original if nothing changed — avoids unnecessary SSE reconstruction
-    if rehydrated == full_content {
+    let changed = (has_content && rehydrated_content != full_content)
+        || (has_reasoning && rehydrated_reasoning != full_reasoning)
+        || (has_reasoning_content && rehydrated_reasoning_content != full_reasoning_content);
+    if !changed {
         return text;
     }
 
-    // Reconstruct: first content chunk gets all rehydrated content;
-    // subsequent content chunks get delta.content removed.
+    // Apply content, reasoning, and reasoning_content edits in series.
+    // Each loop reads from out_events[idx] (which may have been modified
+    // by a prior field loop) so edits compose correctly when the same SSE
+    // event contains multiple delta fields. base is an owned String so the
+    // serialization fallback (never expected in practice, but correct) does
+    // not lose modifications from earlier loops.
     for (i, &idx) in content_indices.iter().enumerate() {
-        if let Ok(mut val) = serde_json::from_str::<Value>(&content_jsons[i]) {
+        let base = out_events[idx].strip_prefix("data: ").unwrap_or(&content_jsons[i]).to_string();
+        if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
             if i == 0 {
-                val["choices"][0]["delta"]["content"] = Value::String(rehydrated.clone());
+                val["choices"][0]["delta"]["content"] = Value::String(rehydrated_content.clone());
             } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
                 delta.remove("content");
             }
-            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| content_jsons[i].clone());
+            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| base.clone());
+            out_events[idx] = format!("data: {}", new_json);
+        }
+    }
+
+    for (i, &idx) in reasoning_indices.iter().enumerate() {
+        let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_jsons[i]).to_string();
+        if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
+            if i == 0 {
+                val["choices"][0]["delta"]["reasoning"] = Value::String(rehydrated_reasoning.clone());
+            } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
+                delta.remove("reasoning");
+            }
+            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| base.clone());
+            out_events[idx] = format!("data: {}", new_json);
+        }
+    }
+
+    for (i, &idx) in reasoning_content_indices.iter().enumerate() {
+        let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_content_jsons[i]).to_string();
+        if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
+            if i == 0 {
+                val["choices"][0]["delta"]["reasoning_content"] =
+                    Value::String(rehydrated_reasoning_content.clone());
+            } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
+                delta.remove("reasoning_content");
+            }
+            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| base.clone());
             out_events[idx] = format!("data: {}", new_json);
         }
     }
@@ -1514,5 +1574,145 @@ mod tests {
                     data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
                     data: [DONE]\n\n";
         assert_eq!(rehydrate_sse_body(body, &faker), body);
+    }
+
+    #[test]
+    fn rehydrate_sse_body_with_reasoning_field() {
+        let faker = Faker::new(None, None);
+        let original_ip = "10.0.0.1";
+        let fake_ip_str = faker.fake(original_ip, &PiiKind::IpAddress);
+        assert_eq!(fake_ip_str, "47.53.71.98");
+
+        // SSE body: IP split across reasoning chunks
+        let sse_body = format!(
+            "data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\"My IP is \"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\"47\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\".53\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\".71\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\".98\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n"
+        );
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+        assert!(
+            result.contains("10.0.0.1"),
+            "rehydrated body should contain original IP in reasoning\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("47.53.71.98"),
+            "rehydrated body should NOT contain fake IP in reasoning\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_with_reasoning_content_field() {
+        let faker = Faker::new(None, None);
+        let original_ip = "10.0.0.1";
+        let fake_ip_str = faker.fake(original_ip, &PiiKind::IpAddress);
+        assert_eq!(fake_ip_str, "47.53.71.98");
+
+        // SSE body: IP split across reasoning_content chunks
+        let sse_body = format!(
+            "data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning_content\":\"My IP is \"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning_content\":\"47\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning_content\":\".53\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning_content\":\".71\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning_content\":\".98\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n"
+        );
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+        assert!(
+            result.contains("10.0.0.1"),
+            "rehydrated body should contain original IP in reasoning_content\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("47.53.71.98"),
+            "rehydrated body should NOT contain fake IP in reasoning_content\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_with_content_and_reasoning() {
+        let faker = Faker::new(None, None);
+        let original_ip = "10.0.0.1";
+        let fake_ip_str = faker.fake(original_ip, &PiiKind::IpAddress);
+        assert_eq!(fake_ip_str, "47.53.71.98");
+
+        let original_email = "user@example.com";
+        let fake_email_str = faker.fake(original_email, &PiiKind::Email);
+        assert_ne!(fake_email_str, original_email);
+
+        // SSE body: IP in reasoning, email in content
+        let sse_body = format!(
+            "data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\"My IP is \"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\"47\",\"content\":\"Contact \"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\".53\",\"content\":\"{fake_email_str}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\".71\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\".98\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n"
+        );
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+        assert!(
+            result.contains("10.0.0.1"),
+            "rehydrated body should contain original IP in reasoning\nGot: {}",
+            result
+        );
+        assert!(
+            result.contains("user@example.com"),
+            "rehydrated body should contain original email in content\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("47.53.71.98"),
+            "rehydrated body should NOT contain fake IP\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_with_reasoning_and_reasoning_content_together() {
+        let faker = Faker::new(None, None);
+        let original_ip = "10.0.0.1";
+        let fake_ip_str = faker.fake(original_ip, &PiiKind::IpAddress);
+        assert_eq!(fake_ip_str, "47.53.71.98");
+
+        // Single event has BOTH reasoning and reasoning_content fields
+        // with the complete fake IP appearing in each field.
+        let sse_body = format!(
+            "data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\"thinking about 47.53.71.98\",\"reasoning_content\":\"47.53.71.98\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"x\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+             data: [DONE]\n\n"
+        );
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+        assert!(
+            result.contains("10.0.0.1"),
+            "rehydrated body should contain original IP\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("47.53.71.98"),
+            "rehydrated body should NOT contain fake IP\nGot: {}",
+            result
+        );
+        // Both fields in the first event should be rehydrated
+        assert!(
+            result.contains("thinking about 10.0.0.1"),
+            "reasoning field should be rehydrated\nGot: {}",
+            result
+        );
     }
 }
