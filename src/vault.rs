@@ -1,8 +1,8 @@
+use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
-use aes_gcm::aead::rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -64,19 +64,29 @@ impl Vault {
     }
 
     /// Create or load a vault with optional legacy key fallback.
-    pub fn new_with_legacy(path: PathBuf, key: &[u8; KEY_LEN], legacy_key: Option<&[u8; KEY_LEN]>, flush_threshold: usize) -> Self {
+    pub fn new_with_legacy(
+        path: PathBuf,
+        key: &[u8; KEY_LEN],
+        legacy_key: Option<&[u8; KEY_LEN]>,
+        flush_threshold: usize,
+    ) -> Self {
         let cipher = Aes256Gcm::new_from_slice(key).expect("valid 256-bit key");
 
         let inner = if path.exists() {
             match Self::load_from_disk(&path, &cipher) {
                 Ok(inner) => {
-                    info!("Loaded vault with {} session(s) from {}", inner.sessions.len(), path.display());
+                    info!(
+                        "Loaded vault with {} session(s) from {}",
+                        inner.sessions.len(),
+                        path.display()
+                    );
                     inner
                 }
                 Err(e) => {
                     // Try legacy key if provided
                     if let Some(lk) = legacy_key {
-                        let legacy_cipher = Aes256Gcm::new_from_slice(lk).expect("valid legacy key");
+                        let legacy_cipher =
+                            Aes256Gcm::new_from_slice(lk).expect("valid legacy key");
                         match Self::load_from_disk(&path, &legacy_cipher) {
                             Ok(inner) => {
                                 info!("Loaded vault using legacy key — will re-encrypt with argon2id on next flush");
@@ -120,17 +130,20 @@ impl Vault {
             2,         // 2 iterations (t_cost)
             1,         // 1 lane (p_cost)
             Some(KEY_LEN),
-        ).expect("valid argon2 params");
-        let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        )
+        .expect("valid argon2 params");
+        let argon2 =
+            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let mut key = [0u8; KEY_LEN];
-        argon2.hash_password_into(passphrase.as_bytes(), SALT, &mut key)
+        argon2
+            .hash_password_into(passphrase.as_bytes(), SALT, &mut key)
             .expect("argon2 hash");
         key
     }
 
     /// Legacy SHA-256 key derivation for backward compatibility with existing vaults.
     pub fn key_from_passphrase_legacy(passphrase: &str) -> [u8; KEY_LEN] {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(passphrase.as_bytes());
         let result = hasher.finalize();
@@ -150,14 +163,20 @@ impl Vault {
             entry.last_used = now;
             entry.use_count += 1;
         } else {
-            session.entries.insert(original.to_string(), VaultEntry {
-                fake: fake.to_string(),
-                kind: kind.to_string(),
-                created_at: now.clone(),
-                last_used: now,
-                use_count: 1,
-            });
-            inner.reverse.insert(fake.to_string(), (session_id.to_string(), original.to_string()));
+            session.entries.insert(
+                original.to_string(),
+                VaultEntry {
+                    fake: fake.to_string(),
+                    kind: kind.to_string(),
+                    created_at: now.clone(),
+                    last_used: now,
+                    use_count: 1,
+                },
+            );
+            inner.reverse.insert(
+                fake.to_string(),
+                (session_id.to_string(), original.to_string()),
+            );
         }
 
         inner.ops_since_flush += 1;
@@ -174,9 +193,12 @@ impl Vault {
     /// Get all mappings for a session (for loading into a Faker)
     pub fn get_session_mappings(&self, session_id: &str) -> Vec<(String, String)> {
         let inner = self.inner.lock().unwrap();
-        inner.sessions.get(session_id)
+        inner
+            .sessions
+            .get(session_id)
             .map(|s| {
-                s.entries.iter()
+                s.entries
+                    .iter()
                     .map(|(original, entry)| (original.clone(), entry.fake.clone()))
                     .collect()
             })
@@ -193,14 +215,20 @@ impl Vault {
             entry.last_used = now;
             entry.use_count += 1;
         } else {
-            inner.forward.insert(original.to_string(), VaultEntry {
-                fake: fake.to_string(),
-                kind: kind.to_string(),
-                created_at: now.clone(),
-                last_used: now,
-                use_count: 1,
-            });
-            inner.reverse.insert(fake.to_string(), ("_global".to_string(), original.to_string()));
+            inner.forward.insert(
+                original.to_string(),
+                VaultEntry {
+                    fake: fake.to_string(),
+                    kind: kind.to_string(),
+                    created_at: now.clone(),
+                    last_used: now,
+                    use_count: 1,
+                },
+            );
+            inner.reverse.insert(
+                fake.to_string(),
+                ("_global".to_string(), original.to_string()),
+            );
         }
 
         inner.ops_since_flush += 1;
@@ -223,7 +251,10 @@ impl Vault {
     /// Look up original for a fake value (for rehydration and `mirage why`).
     pub fn get_original(&self, fake: &str) -> Option<String> {
         let inner = self.inner.lock().unwrap();
-        inner.reverse.get(fake).map(|(_, original)| original.clone())
+        inner
+            .reverse
+            .get(fake)
+            .map(|(_, original)| original.clone())
     }
 
     /// Look up the (session_id, kind, original) for a fake value.
@@ -247,7 +278,9 @@ impl Vault {
     #[cfg(test)]
     pub fn reverse_map(&self) -> Vec<(String, String)> {
         let inner = self.inner.lock().unwrap();
-        let mut pairs: Vec<_> = inner.reverse.iter()
+        let mut pairs: Vec<_> = inner
+            .reverse
+            .iter()
             .map(|(fake, (_, original))| (fake.clone(), original.clone()))
             .collect();
         pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
@@ -283,7 +316,9 @@ impl Vault {
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs);
         let cutoff_str = cutoff.to_rfc3339();
 
-        let stale_keys: Vec<String> = inner.forward.iter()
+        let stale_keys: Vec<String> = inner
+            .forward
+            .iter()
             .filter(|(_, v)| v.last_used < cutoff_str)
             .map(|(k, _)| k.clone())
             .collect();
@@ -320,7 +355,8 @@ impl Vault {
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = self.cipher
+        let ciphertext = self
+            .cipher
             .encrypt(nonce, json.as_ref())
             .map_err(|e| format!("encrypt: {}", e))?;
 
@@ -380,8 +416,14 @@ mod tests {
 
         vault.put("real@email.com", "fake@example.com", "EMAIL");
 
-        assert_eq!(vault.get_fake("real@email.com"), Some("fake@example.com".to_string()));
-        assert_eq!(vault.get_original("fake@example.com"), Some("real@email.com".to_string()));
+        assert_eq!(
+            vault.get_fake("real@email.com"),
+            Some("fake@example.com".to_string())
+        );
+        assert_eq!(
+            vault.get_original("fake@example.com"),
+            Some("real@email.com".to_string())
+        );
         assert_eq!(vault.get_fake("unknown"), None);
 
         let _ = fs::remove_file(&path);

@@ -106,7 +106,18 @@ fn replace_token_bounded(input: &str, needle: &str, replacement: &str) -> String
         let prev = input[..start].chars().next_back();
         let next = input[end..].chars().next();
         let left_ok = prev.map(|c| !is_token_char(c)).unwrap_or(true);
-        let right_ok = next.map(|c| !is_token_char(c)).unwrap_or(true);
+
+        let is_sentence_period = next == Some('.')
+            && input[end..]
+                .chars()
+                .nth(1)
+                .map(|c| {
+                    c.is_whitespace() || c == '"' || c == '\'' || c == ')' || c == ']' || c == '}'
+                })
+                .unwrap_or(true);
+        let right_ok = next
+            .map(|c| !is_token_char(c) || is_sentence_period)
+            .unwrap_or(true);
 
         if left_ok && right_ok {
             out.push_str(&input[last..start]);
@@ -703,7 +714,10 @@ mod tests {
         assert!(rehydrated.contains("53"));
         assert!(rehydrated.contains("71"));
         assert!(rehydrated.contains("98"));
-        assert!(!rehydrated.contains(original), "original should NOT appear — rehydration missed the split IP");
+        assert!(
+            !rehydrated.contains(original),
+            "original should NOT appear — rehydration missed the split IP"
+        );
     }
 
     #[test]
@@ -813,5 +827,52 @@ mod tests {
         let text = "This text has no matches";
         let rehydrated = faker.rehydrate(text);
         assert_eq!(rehydrated, text);
+    }
+
+    #[test]
+    fn test_rehydrate_ip_followed_by_sentence_period() {
+        let mut maps = FakerMaps::new();
+        maps.reverse
+            .insert("84.106.142.195".to_string(), "192.168.1.1".to_string());
+
+        // IP followed by period + space — should rehydrate
+        let input = "The IP is 84.106.142.195. That's all";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "The IP is 192.168.1.1. That's all");
+
+        // IP followed by period + closing quote — should rehydrate
+        let input = "IP: 84.106.142.195.\" He said";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "IP: 192.168.1.1.\" He said");
+
+        // IP followed by period at end of string — should rehydrate
+        let input = "IP is 84.106.142.195.";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "IP is 192.168.1.1.");
+
+        // IP followed by period + digit (no sentence boundary) — should NOT match
+        let input = "IP: 84.106.142.195.5";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "IP: 84.106.142.195.5");
+
+        // IP followed by period + single quote — should rehydrate
+        let input = "IP: 84.106.142.195.' He said";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "IP: 192.168.1.1.' He said");
+
+        // IP followed by period + closing paren — should rehydrate
+        let input = "IP: 84.106.142.195.) Indeed";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "IP: 192.168.1.1.) Indeed");
+
+        // IP followed by period + closing bracket — should rehydrate
+        let input = "IP: 84.106.142.195.] Done";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "IP: 192.168.1.1.] Done");
+
+        // IP followed by period + closing brace — should rehydrate
+        let input = "IP: 84.106.142.195.} The End";
+        let out = maps.rehydrate(input);
+        assert_eq!(out, "IP: 192.168.1.1.} The End");
     }
 }

@@ -421,9 +421,10 @@ pub async fn handle_request(
 
     // Check if this provider is bypassed (no redaction/rehydration)
     let is_chatgpt_early = headers.contains_key("chatgpt-account-id");
-    let resolved_upstream = crate::providers::resolve_provider(&path, is_chatgpt_early, &state.config.custom_providers)
-        .map(|(upstream, _)| upstream.to_string())
-        .unwrap_or_default();
+    let resolved_upstream =
+        crate::providers::resolve_provider(&path, is_chatgpt_early, &state.config.custom_providers)
+            .map(|(upstream, _)| upstream.to_string())
+            .unwrap_or_default();
     if state.config.is_bypassed(&resolved_upstream) {
         debug!("⏩ bypassing {} (matched bypass list)", resolved_upstream);
         let (_, faker) = state.sessions.get_faker("default");
@@ -973,22 +974,22 @@ async fn handle_streaming_as_regular(
         raw
     } else if is_compressed {
         match decompress_body(&raw, &content_encoding) {
-                Ok(decoded) => {
-                        let text = String::from_utf8_lossy(&decoded);
-                        if has_anthropic_thinking_signature(&text) {
-                            debug!("skipping rehydration for signed thinking response (compressed)");
+            Ok(decoded) => {
+                let text = String::from_utf8_lossy(&decoded);
+                if has_anthropic_thinking_signature(&text) {
+                    debug!("skipping rehydration for signed thinking response (compressed)");
+                    raw
+                } else {
+                    let rehydrated = rehydrate_sse_body(&text, &faker);
+                    match compress_body(rehydrated.as_bytes(), &content_encoding) {
+                        Ok(encoded) => encoded,
+                        Err(e) => {
+                            warn!("failed to re-compress rehydrated response: {}", e);
                             raw
-                        } else {
-                            let rehydrated = rehydrate_sse_body(&text, &faker);
-                            match compress_body(rehydrated.as_bytes(), &content_encoding) {
-                                Ok(encoded) => encoded,
-                                Err(e) => {
-                                    warn!("failed to re-compress rehydrated response: {}", e);
-                                    raw
-                                }
-                            }
                         }
                     }
+                }
+            }
             Err(e) => {
                 warn!("failed to decompress streaming response: {}", e);
                 raw
@@ -1412,7 +1413,9 @@ fn redact_json_value(value: &mut Value, state: &ProxyState, faker: &Faker) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_textual_content_type, rehydrate_sse_body, should_skip_redaction_for_payload, Faker};
+    use super::{
+        is_textual_content_type, rehydrate_sse_body, should_skip_redaction_for_payload, Faker,
+    };
     use crate::redactor::PiiKind;
 
     #[test]

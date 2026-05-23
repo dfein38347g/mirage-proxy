@@ -47,7 +47,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bda2-[a-z0-9]{26}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Google / GCP ─────────────────────────────────────────────────────────
     SecretPattern {
         name: "GCP API Key",
@@ -65,7 +64,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r#""type"\s*:\s*"service_account""#,
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Azure ────────────────────────────────────────────────────────────────
     SecretPattern {
         // Azure AD client secrets have a distinctive Q~ marker after 3 alphanum chars + digit.
@@ -75,7 +73,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r#"(?:^|[\\'"`\s>=:(,)])([a-zA-Z0-9_~.]{3}[0-9]Q~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\'"`\s<),])"#,
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── DigitalOcean ─────────────────────────────────────────────────────────
     SecretPattern {
         name: "DigitalOcean Personal Access Token",
@@ -92,14 +89,12 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bdor_v1_[a-f0-9]{64}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Alibaba Cloud ────────────────────────────────────────────────────────
     SecretPattern {
         name: "Alibaba Cloud Access Key ID",
         regex: r"\bLTAI[a-zA-Z0-9]{17,21}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Anthropic ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Anthropic API Key",
@@ -111,7 +106,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bsk-ant-admin01-[a-zA-Z0-9_-]{93}AA\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── OpenAI ───────────────────────────────────────────────────────────────
     SecretPattern {
         // Old format has T3BlbkFJ (base64 of "OpenAI") embedded; new format uses proj/svcacct/admin prefix
@@ -124,14 +118,12 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{58,74}T3BlbkFJ[A-Za-z0-9_-]{58,74}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Perplexity AI ────────────────────────────────────────────────────────
     SecretPattern {
         name: "Perplexity API Key",
         regex: r"\bpplx-[a-zA-Z0-9]{48}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── HuggingFace ──────────────────────────────────────────────────────────
     SecretPattern {
         name: "HuggingFace Access Token",
@@ -143,7 +135,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bapi_org_[a-zA-Z]{34}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── GitHub ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "GitHub Personal Access Token (Classic)",
@@ -175,7 +166,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bghr_[0-9a-zA-Z]{36}\b",
         kind: PiiKind::GithubToken,
     },
-
     // ─── GitLab ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "GitLab Personal Access Token",
@@ -242,7 +232,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bglsoat-[0-9a-zA-Z_-]{20}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Slack ────────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Slack Bot Token",
@@ -284,28 +273,24 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"(?:https?://)?hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Discord ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Discord Webhook URL",
         regex: r"https://discord(?:app)?\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{60,72}",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Stripe ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Stripe Secret / Restricted Key",
         regex: r"\b(?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Square ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Square Access Token",
         regex: r"\b(?:EAAA|sq0atp-)[\w-]{22,60}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Shopify ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Shopify Access Token",
@@ -327,7 +312,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bshpss_[a-fA-F0-9]{32}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Flutterwave ──────────────────────────────────────────────────────────
     SecretPattern {
         name: "Flutterwave Secret Key (Test, 32-char)",
@@ -344,7 +328,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bFLWPUBK_TEST-[a-zA-Z0-9]{32}-X\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── SendGrid ─────────────────────────────────────────────────────────────
     SecretPattern {
         name: "SendGrid API Token",
@@ -352,14 +335,12 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bSG\.[a-zA-Z0-9=_-]{22}\.[a-zA-Z0-9=_-]{43}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Sendinblue / Brevo ───────────────────────────────────────────────────
     SecretPattern {
         name: "Sendinblue (Brevo) API Token",
         regex: r"\bxkeysib-[a-f0-9]{64}-[a-zA-Z0-9]{16}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Mailchimp ────────────────────────────────────────────────────────────
     SecretPattern {
         // Format: <32 lowercase hex>-us<1-2 datacenter digits>
@@ -367,7 +348,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\b[a-f0-9]{32}-us[0-9]{1,2}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Twilio ───────────────────────────────────────────────────────────────
     SecretPattern {
         // SK prefix + 32 hex chars (Twilio API Key SID format)
@@ -375,42 +355,36 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bSK[0-9a-fA-F]{32}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── NPM ──────────────────────────────────────────────────────────────────
     SecretPattern {
         name: "NPM Access Token",
         regex: r"\bnpm_[a-zA-Z0-9]{36}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── PyPI ─────────────────────────────────────────────────────────────────
     SecretPattern {
         name: "PyPI Upload Token",
         regex: r"\bpypi-AgEIcHlwaS5vcmc[\w-]{50,200}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── RubyGems ─────────────────────────────────────────────────────────────
     SecretPattern {
         name: "RubyGems API Token",
         regex: r"\brubygems_[a-f0-9]{48}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Databricks ───────────────────────────────────────────────────────────
     SecretPattern {
         name: "Databricks API Token",
         regex: r"\bdapi[a-f0-9]{32}(?:-[0-9])?\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Doppler ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Doppler API Token",
         regex: r"\bdp\.pt\.[a-zA-Z0-9]{43}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Dynatrace ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Dynatrace API Token (dt0c01 format)",
@@ -422,7 +396,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bdt0[a-zA-Z][0-9]{2}\.[A-Z0-9]{24}\.[A-Z0-9]{64}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Grafana ──────────────────────────────────────────────────────────────
     SecretPattern {
         // Grafana API keys are base64 JSON starting with {"k":" → eyJrIjoi
@@ -440,7 +413,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── New Relic ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "New Relic User API Key",
@@ -457,7 +429,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bNRJS-[a-f0-9]{19}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Sentry ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Sentry User Auth Token",
@@ -469,7 +440,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── HashiCorp Vault ──────────────────────────────────────────────────────
     SecretPattern {
         name: "Vault Service Token",
@@ -481,14 +451,12 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bhvb\.[\w-]{138,200}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── HashiCorp Terraform Cloud ────────────────────────────────────────────
     SecretPattern {
         name: "Terraform Cloud API Token",
         regex: r"(?i)\b[a-z0-9]{14}\.atlasv1\.[a-z0-9_-]{60,70}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── PlanetScale ──────────────────────────────────────────────────────────
     SecretPattern {
         name: "PlanetScale API Token",
@@ -505,70 +473,60 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bpscale_pw_[\w=.-]{32,64}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Postman ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Postman API Token",
         regex: r"\bPMAK-[a-f0-9]{24}-[a-f0-9]{34}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Notion ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Notion Integration Token",
         regex: r"\bntn_[0-9]{11}[A-Za-z0-9]{35}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Linear ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Linear API Key",
         regex: r"\blin_api_[a-zA-Z0-9]{40}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Pulumi ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Pulumi API Token",
         regex: r"\bpul-[a-f0-9]{40}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Prefect ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Prefect API Token",
         regex: r"\bpnu_[a-zA-Z0-9]{36}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── ReadMe ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "ReadMe API Token",
         regex: r"\brdme_[a-z0-9]{70}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Scalingo ─────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Scalingo API Token",
         regex: r"\btk-us-[\w-]{48}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Infracost ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Infracost API Token",
         regex: r"\bico-[a-zA-Z0-9]{32}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── OpenShift ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "OpenShift User Token",
         regex: r"\bsha256~[\w-]{43}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── 1Password ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "1Password Secret Key",
@@ -580,21 +538,18 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bops_eyJ[a-zA-Z0-9+/]{250,}={0,3}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Adobe ────────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Adobe Client Secret",
         regex: r"\bp8e-[a-zA-Z0-9]{32}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Age Encryption ───────────────────────────────────────────────────────
     SecretPattern {
         name: "Age Encryption Secret Key",
         regex: r"\bAGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}\b",
         kind: PiiKind::PrivateKey,
     },
-
     // ─── Airtable ─────────────────────────────────────────────────────────────
     SecretPattern {
         // pat + 14 alphanumeric chars + . + 64 hex chars
@@ -602,7 +557,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bpat[a-zA-Z0-9]{14}\.[a-f0-9]{64}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Artifactory ──────────────────────────────────────────────────────────
     SecretPattern {
         name: "Artifactory API Key",
@@ -614,42 +568,36 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bcmVmd[A-Za-z0-9]{59}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Atlassian ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Atlassian API Token (ATATT3 format)",
         regex: r"\bATATT3[A-Za-z0-9_=-]{186}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Cloudflare ───────────────────────────────────────────────────────────
     SecretPattern {
         name: "Cloudflare Origin CA Key",
         regex: r"\bv1\.0-[a-f0-9]{24}-[a-f0-9]{146}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── ClickHouse Cloud ─────────────────────────────────────────────────────
     SecretPattern {
         name: "ClickHouse Cloud API Key",
         regex: r"\b4b1d[A-Za-z0-9]{38}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Clojars ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Clojars API Token",
         regex: r"(?i)\bCLOJARS_[a-z0-9]{60}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Duffel ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Duffel API Token",
         regex: r"\bduffel_(?:test|live)_[a-zA-Z0-9_-]{43}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── EasyPost ─────────────────────────────────────────────────────────────
     SecretPattern {
         name: "EasyPost API Token",
@@ -661,56 +609,48 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bEZTK[a-zA-Z0-9]{54}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Facebook ─────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Facebook Page / Graph Access Token",
         regex: r"\bEAA[MC][a-zA-Z0-9]{100,}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Fly.io ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Fly.io Access Token",
         regex: r"\b(?:fo1_[\w-]{43}|fm1[ar]_[a-zA-Z0-9+/]{100,}={0,3}|fm2_[a-zA-Z0-9+/]{100,}={0,3})\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Frame.io ─────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Frame.io API Token",
         regex: r"\bfio-u-[a-zA-Z0-9_-]{64}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Heroku ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Heroku API Key (HRKU prefix)",
         regex: r"\bHRKU-AA[0-9a-zA-Z_-]{58}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── MaxMind ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "MaxMind License Key",
         regex: r"\b[A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Octopus Deploy ───────────────────────────────────────────────────────
     SecretPattern {
         name: "Octopus Deploy API Key",
         regex: r"\bAPI-[A-Z0-9]{26}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Shippo ───────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Shippo API Token",
         regex: r"\bshippo_(?:live|test)_[a-fA-F0-9]{40}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── SettleMint ───────────────────────────────────────────────────────────
     SecretPattern {
         name: "SettleMint Application Access Token",
@@ -727,70 +667,60 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bsm_sat_[a-zA-Z0-9]{16}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Typeform ─────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Typeform API Token",
         regex: r"\btfp_[a-z0-9_.-]{59}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Intra42 (42 School) ──────────────────────────────────────────────────
     SecretPattern {
         name: "Intra42 Client Secret",
         regex: r"\bs-s4t2(?:ud|af)-[a-f0-9]{64}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Adafruit IO ──────────────────────────────────────────────────────────
     SecretPattern {
         name: "Adafruit IO Token",
         regex: r"\baio_[a-zA-Z0-9]{28}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Apify ────────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Apify API Token",
         regex: r"\bapify_api_[a-zA-Z0-9-]{36}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Dropbox ──────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Dropbox Short-Lived Token",
         regex: r"\bsl\.[A-Za-z0-9_-]{130,140}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Fleetbase ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Fleetbase Live Token",
         regex: r"\bflb_live_[0-9a-zA-Z]{20}\b",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Cloudinary ───────────────────────────────────────────────────────────
     SecretPattern {
         name: "Cloudinary Credentials URL",
         regex: r"cloudinary://[0-9]+:[A-Za-z0-9_-]+@[A-Za-z0-9_-]+",
         kind: PiiKind::ConnectionString,
     },
-
     // ─── Microsoft Teams ──────────────────────────────────────────────────────
     SecretPattern {
         name: "Microsoft Teams Incoming Webhook",
         regex: r"https://[a-z0-9]+\.webhook\.office\.com/webhookb2/[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── Braintree ────────────────────────────────────────────────────────────
     SecretPattern {
         name: "Braintree Production Access Token",
         regex: r"access_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}",
         kind: PiiKind::GenericApiKey,
     },
-
     // ─── JSON Web Token (structural) ──────────────────────────────────────────
     SecretPattern {
         // JWTs begin with ey (base64 of {") and have three dot-separated segments.
@@ -799,7 +729,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"\bey[A-Za-z0-9_-]{17,}\.ey[A-Za-z0-9_-]{17,}\.[A-Za-z0-9_-]{10,}={0,2}\b",
         kind: PiiKind::BearerToken,
     },
-
     // ─── Private Keys (structural) ────────────────────────────────────────────
     SecretPattern {
         // Matches all PEM private key types: RSA, EC, DSA, OPENSSH, PGP, PKCS8
@@ -807,7 +736,6 @@ pub static SECRET_PATTERNS: &[SecretPattern] = &[
         regex: r"-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----",
         kind: PiiKind::PrivateKey,
     },
-
     // ─── Database / Service Connection Strings (structural) ───────────────────
     SecretPattern {
         name: "PostgreSQL Connection String (with credentials)",

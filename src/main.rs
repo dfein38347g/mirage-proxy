@@ -25,6 +25,7 @@ use tracing::error;
 use audit::AuditLog;
 use config::Config;
 use proxy::{handle_request, CompiledCustomPattern, ProxyState};
+use regex::Regex;
 use session::SessionManager;
 use stats::Stats;
 use vault::Vault;
@@ -102,10 +103,6 @@ struct Args {
     #[arg(long)]
     no_update_check: bool,
 
-    /// Buffer streaming responses: collect all SSE chunks before rehydrating
-    #[arg(long)]
-    no_stream: bool,
-
     /// Install as background service + shell integration (launchd/systemd/Task Scheduler)
     #[arg(long)]
     service_install: bool,
@@ -156,7 +153,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     if args.list_providers {
-        let cfg = Config::load(args.config.as_deref());
         eprintln!();
         eprintln!(
             "  Built-in provider routes ({} providers)",
@@ -165,16 +161,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eprintln!("  ─────────────────────────────────────────────────");
         for p in providers::PROVIDERS {
             eprintln!("  {:16} {:14} → {}", p.name, p.prefix, p.upstream);
-        }
-        if !cfg.custom_providers.is_empty() {
-            eprintln!();
-            eprintln!(
-                "  Custom providers ({} providers):",
-                cfg.custom_providers.len()
-            );
-            for cp in &cfg.custom_providers {
-                eprintln!("  {:16} {:14} → {}", "custom", cp.prefix, cp.upstream);
-            }
         }
         eprintln!();
         return Ok(());
@@ -228,9 +214,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.no_update_check {
         cfg.update_check.enabled = false;
     }
-    if args.no_stream {
-        cfg.force_no_stream = true;
-    }
     if let Some(ref s) = args.sensitivity {
         cfg.sensitivity = match s.as_str() {
             "low" => config::Sensitivity::Low,
@@ -264,42 +247,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Arc::new(v)
     });
 
-    // Compile custom patterns from config
+    let stats = Stats::new();
+
+    // Compile custom regex patterns from config
     let custom_patterns: Vec<CompiledCustomPattern> = cfg
         .custom_patterns
         .iter()
-        .filter_map(|c| {
-            if c.pattern.is_empty() {
-                eprintln!(
-                    "  ⚠ custom pattern '{}' has empty pattern, skipping",
-                    c.name
-                );
-                return None;
+        .filter_map(|c| match Regex::new(&c.pattern) {
+            Ok(re) => {
+                tracing::info!("Compiled custom pattern: {}", c.name);
+                Some(CompiledCustomPattern {
+                    name: c.name.clone(),
+                    regex: re,
+                    substitute: c.substitute.clone(),
+                })
             }
-            match regex::Regex::new(&c.pattern) {
-                Ok(re) => {
-                    eprintln!(
-                        "  ✓ compiled custom pattern: {} -> {}",
-                        c.name, c.substitute
-                    );
-                    Some(CompiledCustomPattern {
-                        name: c.name.clone(),
-                        regex: re,
-                        substitute: c.substitute.clone(),
-                    })
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  ⚠ custom pattern '{}': invalid regex '{}': {}. skipping",
-                        c.name, c.pattern, e
-                    );
-                    None
-                }
+            Err(e) => {
+                tracing::warn!("Skipping invalid custom pattern '{}': {}", c.name, e);
+                None
             }
         })
         .collect();
-
-    let stats = Stats::new();
 
     let state = Arc::new(ProxyState {
         client: Client::new(),
@@ -331,12 +299,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "           ... and {} more (--list-providers)",
         providers::PROVIDERS.len() - 4
     );
-    if !cfg.custom_providers.is_empty() {
-        eprintln!(
-            "  custom:  {} provider routes (--list-providers)",
-            cfg.custom_providers.len()
-        );
-    }
     if cfg.dry_run {
         eprintln!(
             "  mode:    \x1b[33mSHADOW\x1b[0m ({} sensitivity) — detections logged, traffic not modified",
@@ -347,9 +309,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "  mode:    \x1b[32menforce\x1b[0m ({} sensitivity)",
             format!("{:?}", cfg.sensitivity).to_lowercase()
         );
-    }
-    if cfg.force_no_stream {
-        eprintln!("  stream:   \x1b[33mbuffered\x1b[0m (SSE collected before delivery)");
     }
     if cfg.audit.enabled {
         eprintln!("  audit:   {}", cfg.audit.path.display());
