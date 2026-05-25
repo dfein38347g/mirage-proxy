@@ -875,6 +875,47 @@ async fn handle_regular_response(
 /// clears `delta.content` from subsequent chunks.
 /// This fixes PII that gets split across SSE chunk boundaries
 /// (e.g. IP addresses where "84.106.142.195" arrives as separate tokens).
+/// Recursively rehydrate all string values in a JSON value.
+/// Returns true if any string was modified.
+/// This catches substitute values in ANY field, regardless of SSE format.
+fn rehydrate_json_value(value: &mut Value, faker: &Faker) -> bool {
+    match value {
+        Value::String(s) => {
+            let rehydrated = faker.rehydrate(s);
+            if rehydrated != *s {
+                *s = rehydrated;
+                true
+            } else {
+                false
+            }
+        }
+        Value::Array(arr) => {
+            let mut changed = false;
+            for item in arr.iter_mut() {
+                changed = rehydrate_json_value(item, faker) || changed;
+            }
+            changed
+        }
+        Value::Object(obj) => {
+            let mut changed = false;
+            for val in obj.values_mut() {
+                changed = rehydrate_json_value(val, faker) || changed;
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+/// Parse SSE body, rehydrate ALL string values in every event (universal),
+/// and handle cross-chunk boundary PII for content/reasoning/reasoning_content.
+///
+/// Universal rehydration covers any JSON field — content, reasoning,
+/// tool_calls, function_call, or custom provider fields — so custom patterns
+/// are restored everywhere without per-field maintenance.
+///
+/// Cross-chunk handling joins delta.content/delta.reasoning fields across
+/// events to catch PII split across chunk boundaries (e.g. IP addresses).
 fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
     let text = text.replace("\r\n", "\n");
     let events: Vec<&str> = text.split("\n\n").collect();
@@ -933,68 +974,82 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
         }
     }
 
-    let has_content = !content_indices.is_empty();
-    let has_reasoning = !reasoning_indices.is_empty();
-    let has_reasoning_content = !reasoning_content_indices.is_empty();
-
-    if !has_content && !has_reasoning && !has_reasoning_content {
-        return text;
-    }
-
-    let rehydrated_content = if has_content { faker.rehydrate(&full_content) } else { String::new() };
-    let rehydrated_reasoning = if has_reasoning { faker.rehydrate(&full_reasoning) } else { String::new() };
-    let rehydrated_reasoning_content = if has_reasoning_content { faker.rehydrate(&full_reasoning_content) } else { String::new() };
-
-    let changed = (has_content && rehydrated_content != full_content)
-        || (has_reasoning && rehydrated_reasoning != full_reasoning)
-        || (has_reasoning_content && rehydrated_reasoning_content != full_reasoning_content);
-    if !changed {
-        return text;
-    }
-
-    // Apply content, reasoning, and reasoning_content edits in series.
+    // Phase 1: Cross-chunk rehydration for content/reasoning/reasoning_content.
     // Each loop reads from out_events[idx] (which may have been modified
     // by a prior field loop) so edits compose correctly when the same SSE
     // event contains multiple delta fields. base is an owned String so the
     // serialization fallback (never expected in practice, but correct) does
     // not lose modifications from earlier loops.
-    for (i, &idx) in content_indices.iter().enumerate() {
-        let base = out_events[idx].strip_prefix("data: ").unwrap_or(&content_jsons[i]).to_string();
-        if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
-            if i == 0 {
-                val["choices"][0]["delta"]["content"] = Value::String(rehydrated_content.clone());
-            } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
-                delta.remove("content");
+    if !content_indices.is_empty() {
+        let rehydrated = faker.rehydrate(&full_content);
+        if rehydrated != full_content {
+            for (i, &idx) in content_indices.iter().enumerate() {
+                let base = out_events[idx].strip_prefix("data: ").unwrap_or(&content_jsons[i]).to_string();
+                if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
+                    if i == 0 {
+                        val["choices"][0]["delta"]["content"] = Value::String(rehydrated.clone());
+                    } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
+                        delta.remove("content");
+                    }
+                    if let Ok(new_json) = serde_json::to_string(&val) {
+                        out_events[idx] = format!("data: {}", new_json);
+                    }
+                }
             }
-            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| base.clone());
-            out_events[idx] = format!("data: {}", new_json);
         }
     }
 
-    for (i, &idx) in reasoning_indices.iter().enumerate() {
-        let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_jsons[i]).to_string();
-        if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
-            if i == 0 {
-                val["choices"][0]["delta"]["reasoning"] = Value::String(rehydrated_reasoning.clone());
-            } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
-                delta.remove("reasoning");
+    if !reasoning_indices.is_empty() {
+        let rehydrated = faker.rehydrate(&full_reasoning);
+        if rehydrated != full_reasoning {
+            for (i, &idx) in reasoning_indices.iter().enumerate() {
+                let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_jsons[i]).to_string();
+                if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
+                    if i == 0 {
+                        val["choices"][0]["delta"]["reasoning"] = Value::String(rehydrated.clone());
+                    } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
+                        delta.remove("reasoning");
+                    }
+                    if let Ok(new_json) = serde_json::to_string(&val) {
+                        out_events[idx] = format!("data: {}", new_json);
+                    }
+                }
             }
-            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| base.clone());
-            out_events[idx] = format!("data: {}", new_json);
         }
     }
 
-    for (i, &idx) in reasoning_content_indices.iter().enumerate() {
-        let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_content_jsons[i]).to_string();
-        if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
-            if i == 0 {
-                val["choices"][0]["delta"]["reasoning_content"] =
-                    Value::String(rehydrated_reasoning_content.clone());
-            } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
-                delta.remove("reasoning_content");
+    if !reasoning_content_indices.is_empty() {
+        let rehydrated = faker.rehydrate(&full_reasoning_content);
+        if rehydrated != full_reasoning_content {
+            for (i, &idx) in reasoning_content_indices.iter().enumerate() {
+                let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_content_jsons[i]).to_string();
+                if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
+                    if i == 0 {
+                        val["choices"][0]["delta"]["reasoning_content"] = Value::String(rehydrated.clone());
+                    } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
+                        delta.remove("reasoning_content");
+                    }
+                    if let Ok(new_json) = serde_json::to_string(&val) {
+                        out_events[idx] = format!("data: {}", new_json);
+                    }
+                }
             }
-            let new_json = serde_json::to_string(&val).unwrap_or_else(|_| base.clone());
-            out_events[idx] = format!("data: {}", new_json);
+        }
+    }
+
+    // Phase 2: Universal rehydration — rehydrate ALL string values in every event.
+    // This catches custom pattern substitutes in any field (tool_calls,
+    // function_call, custom provider fields, etc.) without per-field tracking.
+    // Only re-serializes events that actually changed (preserves key ordering otherwise).
+    for event in &mut out_events {
+        if let Some(data_str) = event.strip_prefix("data: ") {
+            if let Ok(mut val) = serde_json::from_str::<Value>(data_str) {
+                if rehydrate_json_value(&mut val, faker) {
+                    if let Ok(new_json) = serde_json::to_string(&val) {
+                        *event = format!("data: {}", new_json);
+                    }
+                }
+            }
         }
     }
 
