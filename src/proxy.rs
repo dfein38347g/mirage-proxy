@@ -929,6 +929,13 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
     let mut full_reasoning_content = String::new();
     let mut reasoning_content_indices: Vec<usize> = Vec::new();
     let mut reasoning_content_jsons: Vec<String> = Vec::new();
+    // Tool calls cross-chunk tracking: per tool_call index
+    let mut tc_concat: Vec<String> = Vec::new();
+    let mut tc_first: Vec<usize> = Vec::new();
+    let mut tc_all: Vec<Vec<usize>> = Vec::new();
+    let mut tc_jsons: Vec<Vec<String>> = Vec::new();
+    // Map from API tool_call index (i64) -> our Vec index
+    let mut tc_lookup: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
 
     for event in &events {
         if event.is_empty() {
@@ -963,6 +970,25 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
                             reasoning_content_jsons.push(data_str.to_string());
                         }
                     }
+                    // Collect tool_calls arguments per index for cross-chunk rehydration
+                    if let Some(tcs) = val["choices"][0]["delta"]["tool_calls"].as_array() {
+                        for tc in tcs {
+                            if let Some(args) = tc["function"]["arguments"].as_str() {
+                                if let Some(tc_idx) = tc["index"].as_i64() {
+                                    let vec_idx = *tc_lookup.entry(tc_idx).or_insert_with(|| {
+                                        tc_concat.push(String::new());
+                                        tc_first.push(out_events.len());
+                                        tc_all.push(Vec::new());
+                                        tc_jsons.push(Vec::new());
+                                        tc_concat.len() - 1
+                                    });
+                                    tc_concat[vec_idx].push_str(args);
+                                    tc_all[vec_idx].push(out_events.len());
+                                    tc_jsons[vec_idx].push(data_str.to_string());
+                                }
+                            }
+                        }
+                    }
                     out_events.push(event.to_string());
                 }
                 Err(_) => {
@@ -984,7 +1010,10 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
         let rehydrated = faker.rehydrate(&full_content);
         if rehydrated != full_content {
             for (i, &idx) in content_indices.iter().enumerate() {
-                let base = out_events[idx].strip_prefix("data: ").unwrap_or(&content_jsons[i]).to_string();
+                let base = out_events[idx]
+                    .strip_prefix("data: ")
+                    .unwrap_or(&content_jsons[i])
+                    .to_string();
                 if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
                     if i == 0 {
                         val["choices"][0]["delta"]["content"] = Value::String(rehydrated.clone());
@@ -1003,7 +1032,10 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
         let rehydrated = faker.rehydrate(&full_reasoning);
         if rehydrated != full_reasoning {
             for (i, &idx) in reasoning_indices.iter().enumerate() {
-                let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_jsons[i]).to_string();
+                let base = out_events[idx]
+                    .strip_prefix("data: ")
+                    .unwrap_or(&reasoning_jsons[i])
+                    .to_string();
                 if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
                     if i == 0 {
                         val["choices"][0]["delta"]["reasoning"] = Value::String(rehydrated.clone());
@@ -1022,15 +1054,75 @@ fn rehydrate_sse_body(text: &str, faker: &Faker) -> String {
         let rehydrated = faker.rehydrate(&full_reasoning_content);
         if rehydrated != full_reasoning_content {
             for (i, &idx) in reasoning_content_indices.iter().enumerate() {
-                let base = out_events[idx].strip_prefix("data: ").unwrap_or(&reasoning_content_jsons[i]).to_string();
+                let base = out_events[idx]
+                    .strip_prefix("data: ")
+                    .unwrap_or(&reasoning_content_jsons[i])
+                    .to_string();
                 if let Ok(mut val) = serde_json::from_str::<Value>(&base) {
                     if i == 0 {
-                        val["choices"][0]["delta"]["reasoning_content"] = Value::String(rehydrated.clone());
+                        val["choices"][0]["delta"]["reasoning_content"] =
+                            Value::String(rehydrated.clone());
                     } else if let Some(delta) = val["choices"][0]["delta"].as_object_mut() {
                         delta.remove("reasoning_content");
                     }
                     if let Ok(new_json) = serde_json::to_string(&val) {
                         out_events[idx] = format!("data: {}", new_json);
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 1b: Cross-chunk rehydration for tool_calls arguments.
+    // Tool calls are streamed as incremental function.argument chunks per index.
+    // Without joining, a substitute split across events (e.g. "jo"/"hn") leaks.
+    if !tc_concat.is_empty() {
+        for vec_idx in 0..tc_concat.len() {
+            let full_args = tc_concat[vec_idx].clone();
+            let rehydrated = faker.rehydrate(&full_args);
+            if rehydrated != full_args {
+                let first_ev = tc_first[vec_idx];
+                // Update first event with rehydrated arguments
+                let first_json = &tc_jsons[vec_idx][0];
+                if let Ok(mut val) = serde_json::from_str::<Value>(first_json) {
+                    val["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] =
+                        Value::String(rehydrated.clone());
+                    if let Ok(new_json) = serde_json::to_string(&val) {
+                        out_events[first_ev] = format!("data: {}", new_json);
+                    }
+                }
+                // Clear arguments from subsequent events for this tool call index.
+                // Find the API tool_call index for this vec_idx from tc_lookup.
+                let api_idx = tc_lookup
+                    .iter()
+                    .find(|(_, &v)| v == vec_idx)
+                    .map(|(&k, _)| k);
+                for &ev_idx in &tc_all[vec_idx] {
+                    if ev_idx == first_ev {
+                        continue;
+                    }
+                    let ev_str = &out_events[ev_idx];
+                    if let Some(base) = ev_str.strip_prefix("data: ") {
+                        if let Ok(mut val) = serde_json::from_str::<Value>(base) {
+                            if let Some(tcs) =
+                                val["choices"][0]["delta"]["tool_calls"].as_array_mut()
+                            {
+                                for tc in tcs.iter_mut() {
+                                    let matches = match api_idx {
+                                        Some(i) => tc["index"].as_i64() == Some(i),
+                                        None => true,
+                                    };
+                                    if matches {
+                                        if let Some(func) = tc["function"].as_object_mut() {
+                                            func.remove("arguments");
+                                        }
+                                    }
+                                }
+                            }
+                            if let Ok(new_json) = serde_json::to_string(&val) {
+                                out_events[ev_idx] = format!("data: {}", new_json);
+                            }
+                        }
                     }
                 }
             }
@@ -1767,6 +1859,61 @@ mod tests {
         assert!(
             result.contains("thinking about 10.0.0.1"),
             "reasoning field should be rehydrated\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_tool_calls_single_event() {
+        let faker = Faker::new(None, None);
+        faker.add_custom_mapping("Nathan", "john");
+
+        // Single event with tool_calls containing the substitute in arguments
+        let sse_body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+                        data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\"/home/john/Nixos-dev-ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+                        data: [DONE]\n\n";
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+        assert!(
+            result.contains("/home/Nathan/Nixos-dev-ai"),
+            "tool_calls arguments should be rehydrated\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("/home/john/Nixos-dev-ai"),
+            "tool_calls arguments should NOT contain substitute\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_tool_calls_split_across_events() {
+        let faker = Faker::new(None, None);
+        faker.add_custom_mapping("Nathan", "john");
+
+        // Tool calls arguments split across multiple SSE events (common in streaming)
+        // "john" appears split: "jo" in event 1, "hn" in event 2
+        let sse_body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+                        data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\"/home/jo\"}}]},\"finish_reason\":null}]}\n\n\
+                        data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"hn/Nixos-dev-ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+                        data: [DONE]\n\n";
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+        // Cross-chunk join rehydrates the concatenated arguments and puts them
+        // in the first event. Subsequent events have their arguments field removed.
+        assert!(
+            result.contains("/home/Nathan/Nixos-dev-ai"),
+            "cross-event tool_calls arguments should be rehydrated\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("jo"),
+            "split 'jo' should be rehydrated\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("hn"),
+            "split 'hn' should be rehydrated\nGot: {}",
             result
         );
     }

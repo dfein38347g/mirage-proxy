@@ -854,7 +854,10 @@ mod tests {
             ("path=/home/john", "path=/home/nathan"),
             ("/john/home/john", "/nathan/home/nathan"),
             ("john", "nathan"),
-            ("The path is /home/john/files", "The path is /home/nathan/files"),
+            (
+                "The path is /home/john/files",
+                "The path is /home/nathan/files",
+            ),
         ] {
             let rehydrated = faker.rehydrate(response);
             assert_eq!(rehydrated, expected, "Failed for input: {}", response);
