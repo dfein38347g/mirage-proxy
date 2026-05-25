@@ -260,6 +260,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let custom_patterns: Vec<CompiledCustomPattern> = cfg
         .custom_patterns
         .iter()
+        .filter(|c| {
+            if c.pattern.is_empty() {
+                tracing::warn!("Skipping custom pattern '{}': empty pattern", c.name);
+                false
+            } else {
+                true
+            }
+        })
         .filter_map(|c| match Regex::new(&c.pattern) {
             Ok(re) => {
                 tracing::info!("Compiled custom pattern: {}", c.name);
@@ -267,6 +275,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     name: c.name.clone(),
                     regex: re,
                     substitute: c.substitute.clone(),
+                    pattern_str: c.pattern.clone(),
                 })
             }
             Err(e) => {
