@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use regex::Regex;
+
 use crate::redactor::PiiKind;
 use crate::vault::Vault;
 
@@ -14,19 +16,21 @@ pub struct Faker {
     session_id: Option<String>,
 }
 
-struct FakerMaps {
-    forward: HashMap<String, String>,        // original -> fake
-    reverse: HashMap<String, String>,        // fake -> original
-    custom_reverse: HashMap<String, String>, // substitute -> original (no length restriction)
-    counter: usize,
+pub(crate) struct FakerMaps {
+    pub(crate) forward: HashMap<String, String>,        // original -> fake
+    pub(crate) reverse: HashMap<String, String>,        // fake -> original
+    pub(crate) custom_reverse: HashMap<String, String>, // substitute -> original (no length restriction)
+    pub(crate) custom_regexes: HashMap<String, Regex>,  // substitute -> rehydration regex
+    pub(crate) counter: usize,
 }
 
 impl FakerMaps {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         FakerMaps {
             forward: HashMap::new(),
             reverse: HashMap::new(),
             custom_reverse: HashMap::new(),
+            custom_regexes: HashMap::new(),
             counter: 0,
         }
     }
@@ -47,7 +51,10 @@ impl FakerMaps {
     }
 
     fn lookup(&self, fake: &str) -> Option<String> {
-        self.reverse.get(fake).cloned()
+        self.reverse
+            .get(fake)
+            .cloned()
+            .or_else(|| self.custom_reverse.get(fake).cloned())
     }
 
     fn rehydrate(&self, text: &str) -> String {
@@ -69,10 +76,20 @@ impl FakerMaps {
             }
         }
 
-        // Apply custom pattern mappings (no minimum-length restriction,
-        // no boundary guards — user-defined patterns replace unconditionally)
-        for (fake, original) in &self.custom_reverse {
-            result = result.replace(fake, original);
+        // Apply custom pattern mappings with regex-bounded rehydration.
+        // Uses the same boundary logic as the original pattern (e.g. \b for word
+        // boundaries), derived from the pattern by replacing the original literal
+        // with the substitute. Falls back to plain replace if no regex available.
+        // Sort by length descending so longer substitutes are tried first,
+        // preventing shorter ones from stealing matches from longer ones.
+        let mut custom_pairs: Vec<_> = self.custom_reverse.iter().collect();
+        custom_pairs.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
+        for (fake, original) in custom_pairs {
+            if let Some(re) = self.custom_regexes.get(fake) {
+                result = re.replace_all(&result, original.as_str()).to_string();
+            } else {
+                result = result.replace(fake, original);
+            }
         }
 
         result
@@ -153,6 +170,16 @@ static FAKE_SURNAMES: &[&str] = &[
 ];
 
 impl Faker {
+    /// Construct a Faker from pre-built maps (used in tests for standard PII).
+    #[cfg(test)]
+    pub(crate) fn from_maps(maps: FakerMaps, vault: Option<Arc<Vault>>) -> Self {
+        Faker {
+            maps: Mutex::new(maps),
+            vault,
+            session_id: None,
+        }
+    }
+
     pub fn new(vault: Option<Arc<Vault>>, session_id: Option<String>) -> Self {
         // Load existing mappings from vault for this session
         let mut maps = FakerMaps::new();
@@ -226,12 +253,35 @@ impl Faker {
     /// Register a user-defined pattern substitution.
     /// These mappings bypass the minimum-length rehydration guard
     /// since the user explicitly chose the substitute string.
-    pub fn add_custom_mapping(&self, original: &str, substitute: &str) {
+    /// If `pattern_str` is provided, derives a rehydration regex that
+    /// applies the same boundary logic (e.g. \b) as the original pattern.
+    pub fn add_custom_mapping(&self, original: &str, substitute: &str, pattern_str: Option<&str>) {
         let mut maps = self.maps.lock().unwrap();
         maps.forward
             .insert(original.to_string(), substitute.to_string());
         maps.custom_reverse
-            .insert(substitute.to_string(), original.to_string());
+            .entry(substitute.to_string())
+            .or_insert_with(|| original.to_string());
+
+        // Derive a rehydration regex: replace the original literal with the
+        // substitute in the pattern string, preserving flags and boundaries.
+        // Tries lowercase fallback for case-insensitive patterns (e.g. the
+        // regex matched "Nathan" but the pattern literal is "nathan").
+        // Only stores on first derivation for each substitute.
+        if let Some(pat) = pattern_str {
+            if !maps.custom_regexes.contains_key(substitute) {
+                let escaped = regex::escape(substitute);
+                let mut rehydrate_str = pat.replace(original, &escaped);
+                if rehydrate_str == *pat {
+                    rehydrate_str = pat.replace(&original.to_lowercase(), &escaped);
+                }
+                if rehydrate_str != *pat {
+                    if let Ok(re) = Regex::new(&rehydrate_str) {
+                        maps.custom_regexes.insert(substitute.to_string(), re);
+                    }
+                }
+            }
+        }
     }
 
     /// Look up the original value for a fake (used by `mirage why <decoy>`).
@@ -774,7 +824,7 @@ mod tests {
         let original = "nathan";
         let substitute = "john";
 
-        faker.add_custom_mapping(original, substitute);
+        faker.add_custom_mapping(original, substitute, None);
         let request_body = "My name is nathan and I work here";
         let substituted = request_body.replace(original, substitute);
         assert_eq!(substituted, "My name is john and I work here");
@@ -788,8 +838,8 @@ mod tests {
     fn test_multiple_custom_patterns() {
         let faker = Faker::new(None, None);
 
-        faker.add_custom_mapping("nathan", "john");
-        faker.add_custom_mapping("343-324", "000-000");
+        faker.add_custom_mapping("nathan", "john", None);
+        faker.add_custom_mapping("343-324", "000-000", None);
 
         let text = "User nathan has id 343-324";
         let substituted = text.replace("nathan", "john").replace("343-324", "000-000");
@@ -804,7 +854,7 @@ mod tests {
     fn test_custom_pattern_short_substitute_rehydrates() {
         let faker = Faker::new(None, None);
 
-        faker.add_custom_mapping("secret", "key");
+        faker.add_custom_mapping("secret", "key", None);
 
         let request = "The secret is safe";
         let substituted = request.replace("secret", "key");
@@ -820,7 +870,7 @@ mod tests {
         let faker = Faker::new(None, None);
         let original = "Nathan";
         let substitute = "john";
-        faker.add_custom_mapping(original, substitute);
+        faker.add_custom_mapping(original, substitute, None);
         let response_body = "The path is /home/john/files";
         let rehydrated = faker.rehydrate(response_body);
         assert_eq!(rehydrated, "The path is /home/Nathan/files");
@@ -831,7 +881,7 @@ mod tests {
         let faker = Faker::new(None, None);
         let original = "nathan";
         let substitute = "john";
-        faker.add_custom_mapping(original, substitute);
+        faker.add_custom_mapping(original, substitute, None);
         let response_body = "The path is /home/john/files";
         let rehydrated = faker.rehydrate(response_body);
         assert_eq!(rehydrated, "The path is /home/nathan/files");
@@ -840,7 +890,7 @@ mod tests {
     #[test]
     fn test_custom_pattern_rehydrates_various_paths() {
         let faker = Faker::new(None, None);
-        faker.add_custom_mapping("nathan", "john");
+        faker.add_custom_mapping("nathan", "john", None);
 
         for (response, expected) in [
             ("/home/john/files", "/home/nathan/files"),
@@ -864,7 +914,7 @@ mod tests {
     #[test]
     fn test_custom_pattern_rehydrates_in_path_with_trailing_period() {
         let faker = Faker::new(None, None);
-        faker.add_custom_mapping("nathan", "john");
+        faker.add_custom_mapping("nathan", "john", None);
 
         // john followed by period (sentence boundary) should rehydrate
         let rehydrated = faker.rehydrate("The path is /home/john. The rest");
@@ -876,35 +926,95 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_pattern_rehydrates_unconditional() {
+    fn test_custom_pattern_rehydrates_with_regex_boundaries() {
         let faker = Faker::new(None, None);
-        faker.add_custom_mapping("nathan", "john");
+        let pattern = r"(?i)\bnathan\b";
+        faker.add_custom_mapping("nathan", "john", Some(pattern));
 
-        // "john" in midword rehydrates unconditionally (no boundary guards)
+        // "john" in midword should NOT rehydrate (no \b boundary)
         let rehydrated = faker.rehydrate("My name is johnathan");
-        assert_eq!(rehydrated, "My name is nathanathan");
+        assert_eq!(rehydrated, "My name is johnathan");
 
-        // "john" at non-word start boundary
+        // "john" at non-word start boundary should NOT rehydrate
         let rehydrated = faker.rehydrate("myjohn");
-        assert_eq!(rehydrated, "mynathan");
+        assert_eq!(rehydrated, "myjohn");
 
-        // "john" followed by hyphen rehydrates
+        // "john" followed by hyphen SHOULD rehydrate (- is \W, \b matches)
         let rehydrated = faker.rehydrate("/home/john-test.txt");
         assert_eq!(rehydrated, "/home/nathan-test.txt");
 
-        // "john" followed by period rehydrates
+        // "john" followed by period SHOULD rehydrate (. is \W, \b matches)
         let rehydrated = faker.rehydrate("/home/john.test.txt");
         assert_eq!(rehydrated, "/home/nathan.test.txt");
 
-        // "john" at end of path rehydrates
+        // "john" at end of path SHOULD rehydrate
         let rehydrated = faker.rehydrate("/home/john");
         assert_eq!(rehydrated, "/home/nathan");
+
+        // "john" at start of string SHOULD rehydrate
+        let rehydrated = faker.rehydrate("john and jane");
+        assert_eq!(rehydrated, "nathan and jane");
+
+        // case-insensitive: "John" should also rehydrate
+        let rehydrated = faker.rehydrate("/home/John");
+        assert_eq!(rehydrated, "/home/nathan");
+    }
+
+    #[test]
+    fn test_custom_pattern_rehydrates_capitalized_original() {
+        let faker = Faker::new(None, None);
+        let pattern = r"(?i)\bnathan\b";
+        // add_custom_mapping is called with capitalized "Nathan" (as matched by
+        // the case-insensitive regex) — lowercase fallback must derive correctly
+        faker.add_custom_mapping("Nathan", "john", Some(pattern));
+
+        let rehydrated = faker.rehydrate("/home/john/files");
+        assert_eq!(rehydrated, "/home/Nathan/files");
+
+        // case-insensitive match: "John" → "Nathan"
+        let rehydrated = faker.rehydrate("/home/John");
+        assert_eq!(rehydrated, "/home/Nathan");
+
+        // midword "johnathan" should NOT rehydrate (\b boundary)
+        let rehydrated = faker.rehydrate("johnathan");
+        assert_eq!(rehydrated, "johnathan");
+    }
+
+    #[test]
+    fn test_custom_pattern_rehydrates_escaped_substitute() {
+        let faker = Faker::new(None, None);
+        let pattern = r"\bnathan\b";
+        // substitute with regex metacharacter "." — must be escaped in rehydration regex
+        faker.add_custom_mapping("nathan", "john.smith", Some(pattern));
+
+        // "john.smith" should rehydrate (literal ".", not wildcard)
+        let rehydrated = faker.rehydrate("/home/john.smith/files");
+        assert_eq!(rehydrated, "/home/nathan/files");
+
+        // "johnXsmith" should NOT rehydrate (different character)
+        let rehydrated = faker.rehydrate("/home/johnXsmith");
+        assert_eq!(rehydrated, "/home/johnXsmith");
+    }
+
+    #[test]
+    fn test_custom_pattern_rehydrates_escaped_substitute_fallback() {
+        let faker = Faker::new(None, None);
+        // No pattern provided — falls back to plain replace (exact string match)
+        faker.add_custom_mapping("nathan", "john.smith", None);
+
+        // Full string "john.smith" rehydrates
+        let rehydrated = faker.rehydrate("/home/john.smith");
+        assert_eq!(rehydrated, "/home/nathan");
+
+        // "johnXsmith" does NOT match (not the exact string)
+        let rehydrated = faker.rehydrate("/home/johnXsmith");
+        assert_eq!(rehydrated, "/home/johnXsmith");
     }
 
     #[test]
     fn test_no_custom_match_passes_through() {
         let faker = Faker::new(None, None);
-        faker.add_custom_mapping("something", "else");
+        faker.add_custom_mapping("something", "else", None);
         let text = "This text has no matches";
         let rehydrated = faker.rehydrate(text);
         assert_eq!(rehydrated, text);
@@ -955,5 +1065,85 @@ mod tests {
         let input = "IP: 84.106.142.195.} The End";
         let out = maps.rehydrate(input);
         assert_eq!(out, "IP: 192.168.1.1.} The End");
+    }
+
+    #[test]
+    fn test_concurrent_custom_mappings() {
+        let faker = Faker::new(None, None);
+        let faker = std::sync::Arc::new(faker);
+        let mut handles = Vec::new();
+
+        // Spawn 8 threads, each adding a unique mapping and rehydrating
+        for i in 0..8 {
+            let f = faker.clone();
+            handles.push(std::thread::spawn(move || {
+                let original = format!("secret_{}", i);
+                let substitute = format!("key_{}", i);
+                f.add_custom_mapping(&original, &substitute, None);
+
+                // Rehydrate a string that may contain any thread's substitute
+                let text = format!("The value is key_{}", i);
+                let rehydrated = f.rehydrate(&text);
+                assert_eq!(rehydrated, format!("The value is secret_{}", i));
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+        assert_eq!(faker.lookup_original("key_0"), Some("secret_0".to_string()));
+    }
+
+    #[test]
+    fn test_concurrent_custom_mappings_with_regex() {
+        let faker = Faker::new(None, None);
+        let faker = std::sync::Arc::new(faker);
+        let mut handles = Vec::new();
+
+        let patterns = vec![
+            ("Nathan", "john", r"\bnathan\b"),
+            ("secret123", "key456", r"\bsecret\d+\b"),
+            ("test.user", "fake.person", r"\btest\.user\b"),
+        ];
+
+        for (original, substitute, pattern) in patterns {
+            let f = faker.clone();
+            handles.push(std::thread::spawn(move || {
+                f.add_custom_mapping(original, substitute, Some(pattern));
+                let rehydrated = f.rehydrate(substitute);
+                assert_eq!(rehydrated, original);
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+    }
+
+    #[test]
+    fn test_concurrent_read_write() {
+        let faker = Faker::new(None, None);
+        let faker = std::sync::Arc::new(faker);
+        let mut handles = Vec::new();
+
+        // Half threads write mappings, half read — exercise the Mutex
+        faker.add_custom_mapping("root_original", "root_fake", None);
+        for i in 0..8 {
+            let f = faker.clone();
+            handles.push(std::thread::spawn(move || {
+                if i % 2 == 0 {
+                    let original = format!("writer_{}", i);
+                    let substitute = format!("sub_{}", i);
+                    f.add_custom_mapping(&original, &substitute, None);
+                } else {
+                    let r = f.rehydrate("root_fake");
+                    assert_eq!(r, "root_original");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
     }
 }

@@ -61,6 +61,7 @@ pub struct CompiledCustomPattern {
     pub name: String,
     pub regex: Regex,
     pub substitute: String,
+    pub pattern_str: String,
 }
 
 pub struct ProxyState {
@@ -1227,10 +1228,14 @@ async fn handle_streaming_response(
     let content_encoding = header_content_encoding(&resp_headers);
     let stream_is_compressed = !content_encoding.is_empty() && content_encoding != "identity";
 
-    let stats_clone = state.stats.clone();
+        let stats_clone = state.stats.clone();
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
         // Buffer to handle fake values split across chunk boundaries.
+        // Uses SSE event boundaries (\n\n) to preserve tool_calls argument
+        // deltas so they can be joined within the same rehydrate_sse_body call.
+        // Cross-chunk tool_calls joining is only available in buffered mode
+        // (--no-stream / force_no_stream) via the handle_streaming_as_regular path.
         const BOUNDARY_BUF_SIZE: usize = 128;
         let mut leftover = String::new();
 
@@ -1265,12 +1270,19 @@ async fn handle_streaming_response(
                             debug!("detected signed thinking chunk in SSE stream — passing through unchanged");
                             combined.into_bytes()
                         } else {
-                            // Hold back tail as overlap to catch boundary-split fake values
+                            // Split at an SSE event boundary (\n\n) so tool_calls
+                            // argument deltas are kept together. Falls back to line
+                            // boundary (\n) when no double-newline is found.
                             let (to_process, new_leftover) = if combined.len() > BOUNDARY_BUF_SIZE {
                                 let split_at = combined.len() - BOUNDARY_BUF_SIZE;
-                                let safe_split = combined[split_at..]
-                                    .find('\n')
-                                    .map(|pos| split_at + pos + 1)
+                                let safe_split = combined[..split_at]
+                                    .rfind("\n\n")
+                                    .map(|pos| pos + 2)
+                                    .or_else(|| {
+                                        combined[split_at..]
+                                            .find('\n')
+                                            .map(|pos| split_at + pos + 1)
+                                    })
                                     .unwrap_or(split_at);
                                 (&combined[..safe_split], &combined[safe_split..])
                             } else {
@@ -1279,7 +1291,9 @@ async fn handle_streaming_response(
                             };
 
                             leftover = new_leftover.to_string();
-                            faker.rehydrate(to_process).into_bytes()
+                            // Use SSE-aware rehydration so tool_calls arguments in
+                            // the same chunk are joined and rehydrated correctly.
+                            rehydrate_sse_body(to_process, &faker).into_bytes()
                         }
                     };
 
@@ -1301,7 +1315,7 @@ async fn handle_streaming_response(
             } else if has_anthropic_thinking_signature(&leftover) {
                 leftover.into_bytes()
             } else {
-                faker.rehydrate(&leftover).into_bytes()
+                rehydrate_sse_body(&leftover, &faker).into_bytes()
             };
             let frame = Frame::data(Bytes::from(flushed));
             let _ = tx.send(Ok(frame)).await;
@@ -1430,7 +1444,7 @@ fn smart_redact(text: &str, state: &ProxyState, faker: &Faker) -> String {
         let current = result.clone();
         for m in cp.regex.find_iter(&current) {
             let original = m.as_str();
-            faker.add_custom_mapping(original, &cp.substitute);
+            faker.add_custom_mapping(original, &cp.substitute, Some(&cp.pattern_str));
             result = result.replace(original, &cp.substitute);
             // Log custom pattern match
             let preview = truncate_preview(original, 40);
@@ -1866,9 +1880,9 @@ mod tests {
     #[test]
     fn rehydrate_sse_body_tool_calls_single_event() {
         let faker = Faker::new(None, None);
-        faker.add_custom_mapping("Nathan", "john");
+        faker.add_custom_mapping("Nathan", "john", None);
 
-        // Single event with tool_calls containing the substitute in arguments
+        // Tool calls arguments in a single SSE event (no splitting)
         let sse_body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
                         data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\"/home/john/Nixos-dev-ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
                         data: [DONE]\n\n";
@@ -1876,12 +1890,12 @@ mod tests {
         let result = rehydrate_sse_body(&sse_body, &faker);
         assert!(
             result.contains("/home/Nathan/Nixos-dev-ai"),
-            "tool_calls arguments should be rehydrated\nGot: {}",
+            "single-event tool_calls arguments should be rehydrated\nGot: {}",
             result
         );
         assert!(
-            !result.contains("/home/john/Nixos-dev-ai"),
-            "tool_calls arguments should NOT contain substitute\nGot: {}",
+            !result.contains("john"),
+            "'john' should be rehydrated away in single event\nGot: {}",
             result
         );
     }
@@ -1889,7 +1903,7 @@ mod tests {
     #[test]
     fn rehydrate_sse_body_tool_calls_split_across_events() {
         let faker = Faker::new(None, None);
-        faker.add_custom_mapping("Nathan", "john");
+        faker.add_custom_mapping("Nathan", "john", None);
 
         // Tool calls arguments split across multiple SSE events (common in streaming)
         // "john" appears split: "jo" in event 1, "hn" in event 2
@@ -1914,6 +1928,139 @@ mod tests {
         assert!(
             !result.contains("hn"),
             "split 'hn' should be rehydrated\nGot: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn rehydrate_sse_body_tool_calls_split_with_regex_boundaries() {
+        let faker = Faker::new(None, None);
+        // Same scenario but with a pattern string — exercises the regex-bounded path
+        faker.add_custom_mapping("Nathan", "john", Some(r"\bnathan\b"));
+
+        // "john" split across events as in the None-pattern test
+        let sse_body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+                        data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\"/home/jo\"}}]},\"finish_reason\":null}]}\n\n\
+                        data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"hn/Nixos-dev-ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+                        data: [DONE]\n\n";
+
+        let result = rehydrate_sse_body(&sse_body, &faker);
+        assert!(
+            result.contains("/home/Nathan/Nixos-dev-ai"),
+            "regex-bounded cross-event rehydration should work\nGot: {}",
+            result
+        );
+
+        // "john" in midword should NOT rehydrate (would trigger without regex boundaries)
+        let sse_body2 = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"foo\",\"arguments\":\"{\\\"name\\\":\\\"johnathan\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+                         data: [DONE]\n\n";
+        let result2 = rehydrate_sse_body(&sse_body2, &faker);
+        assert!(
+            !result2.contains("nathanathan"),
+            "midword 'johnathan' must not rehydrate with regex boundaries\nGot: {}",
+            result2
+        );
+    }
+
+    /// Cross-chunk tool_calls limitation: when tool_calls arguments are split
+    /// across separate `rehydrate_sse_body` calls (as happens in the streaming
+    /// path), the substitute cannot be joined and rehydrated. Only the buffered
+    /// path (which passes the full SSE body at once) handles this correctly.
+    #[test]
+    fn rehydrate_sse_body_cross_chunk_tool_calls_limitation() {
+        let faker = Faker::new(None, None);
+        faker.add_custom_mapping("Nathan", "john", Some(r"\bnathan\b"));
+
+        // Chunk 1: first event (role) + second event (partial tool_calls args)
+        let chunk1 = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+                      data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\"/home/jo\"}}]},\"finish_reason\":null}]}\n\n";
+        let result1 = rehydrate_sse_body(chunk1, &faker);
+        // Partial "jo" should NOT rehydrate (no "john" to match)
+        assert!(
+            !result1.contains("Nathan"),
+            "cross-chunk partial 'jo' must not rehydrate alone\nGot: {}",
+            result1
+        );
+
+        // Chunk 2: continuation of tool_calls arguments + [DONE]
+        let chunk2 = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"hn/Nixos-dev-ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+                      data: [DONE]\n\n";
+        let result2 = rehydrate_sse_body(chunk2, &faker);
+        // Continuation "hn" should also NOT rehydrate
+        assert!(
+            !result2.contains("Nathan"),
+            "cross-chunk continuation 'hn' must not rehydrate alone\nGot: {}",
+            result2
+        );
+
+        // Full body (both chunks combined) — should rehydrate correctly
+        let full = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+                    data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\"/home/jo\"}}]},\"finish_reason\":null}]}\n\n\
+                    data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"hn/Nixos-dev-ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+                    data: [DONE]\n\n";
+        let result_full = rehydrate_sse_body(full, &faker);
+        assert!(
+            result_full.contains("/home/Nathan/Nixos-dev-ai"),
+            "buffered full body must rehydrate cross-chunk tool_calls\nGot: {}",
+            result_full
+        );
+    }
+
+    /// Standard PII (IP address) inside tool_calls arguments.
+    /// Phase 1b joins arguments and calls faker.rehydrate() on the result,
+    /// then Phase 2 rehydrates all string values as a catch-all.
+    #[test]
+    fn rehydrate_sse_body_standard_pii_in_tool_calls() {
+        let mut maps = crate::faker::FakerMaps::new();
+        maps.reverse
+            .insert("84.106.142.195".to_string(), "192.168.1.1".to_string());
+        maps.forward
+            .insert("192.168.1.1".to_string(), "84.106.142.195".to_string());
+        let faker = crate::faker::Faker::from_maps(maps, None);
+
+        // Tool calls with arguments containing the fake IP
+        let sse_body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+                        data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"connect\",\"arguments\":\"{\\\"host\\\":\\\"84.106.142.195\\\",\\\"port\\\":22}\"}}]},\"finish_reason\":null}]}\n\n\
+                        data: [DONE]\n\n";
+
+        let result = rehydrate_sse_body(sse_body, &faker);
+        assert!(
+            result.contains("192.168.1.1"),
+            "standard IP in tool_calls arguments should rehydrate\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("84.106.142.195"),
+            "fake IP should be replaced\nGot: {}",
+            result
+        );
+    }
+
+    /// Standard PII inside a custom provider field (non-OpenAI JSON field).
+    /// Phase 2 universal rehydration catches ANY string value, not just
+    /// known OpenAI fields like content/tool_calls.
+    #[test]
+    fn rehydrate_sse_body_standard_pii_in_custom_field() {
+        let mut maps = crate::faker::FakerMaps::new();
+        maps.reverse
+            .insert("84.106.142.195".to_string(), "192.168.1.1".to_string());
+        maps.forward
+            .insert("192.168.1.1".to_string(), "84.106.142.195".to_string());
+        let faker = crate::faker::Faker::from_maps(maps, None);
+
+        // Custom provider response with a non-standard field containing the fake IP
+        let sse_body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null,\"x_custom_metadata\":\"connected from 84.106.142.195\"}]}\n\n\
+                        data: [DONE]\n\n";
+
+        let result = rehydrate_sse_body(sse_body, &faker);
+        assert!(
+            result.contains("connected from 192.168.1.1"),
+            "standard IP in custom field should rehydrate\nGot: {}",
+            result
+        );
+        assert!(
+            !result.contains("84.106.142.195"),
+            "fake IP should be replaced in custom field\nGot: {}",
             result
         );
     }
