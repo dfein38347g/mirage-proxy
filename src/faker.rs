@@ -819,11 +819,80 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_pattern_rehydrates_in_path() {
+        let faker = Faker::new(None, None);
+        let original = "Nathan";
+        let substitute = "john";
+        faker.add_custom_mapping(original, substitute);
+        let response_body = "The path is /home/john/files";
+        let rehydrated = faker.rehydrate(response_body);
+        assert_eq!(rehydrated, "The path is /home/Nathan/files");
+    }
+
+    #[test]
+    fn test_custom_pattern_rehydrates_lowercase_in_path() {
+        let faker = Faker::new(None, None);
+        let original = "nathan";
+        let substitute = "john";
+        faker.add_custom_mapping(original, substitute);
+        let response_body = "The path is /home/john/files";
+        let rehydrated = faker.rehydrate(response_body);
+        assert_eq!(rehydrated, "The path is /home/nathan/files");
+    }
+
+    #[test]
+    fn test_custom_pattern_rehydrates_various_paths() {
+        let faker = Faker::new(None, None);
+        faker.add_custom_mapping("nathan", "john");
+
+        for (response, expected) in [
+            ("/home/john/files", "/home/nathan/files"),
+            ("/home/john", "/home/nathan"),
+            ("john/files", "nathan/files"),
+            ("/home/john/", "/home/nathan/"),
+            (r#""/home/john/files""#, r#""/home/nathan/files""#),
+            ("path=/home/john", "path=/home/nathan"),
+            ("/john/home/john", "/nathan/home/nathan"),
+            ("john", "nathan"),
+            ("The path is /home/john/files", "The path is /home/nathan/files"),
+        ] {
+            let rehydrated = faker.rehydrate(response);
+            assert_eq!(rehydrated, expected, "Failed for input: {}", response);
+        }
+    }
+
+    #[test]
+    fn test_custom_pattern_rehydrates_in_path_with_trailing_period() {
+        let faker = Faker::new(None, None);
+        faker.add_custom_mapping("nathan", "john");
+
+        // john followed by period (sentence boundary) should rehydrate
+        let rehydrated = faker.rehydrate("The path is /home/john. The rest");
+        assert_eq!(rehydrated, "The path is /home/nathan. The rest");
+
+        // john followed by period at end should rehydrate
+        let rehydrated = faker.rehydrate("Path is /home/john.");
+        assert_eq!(rehydrated, "Path is /home/nathan.");
+    }
+
+    #[test]
+    fn test_custom_pattern_prevents_midword_rehydration() {
+        let faker = Faker::new(None, None);
+        faker.add_custom_mapping("nathan", "john");
+
+        // "john" should NOT rehydrate inside "johnathan"
+        let rehydrated = faker.rehydrate("My name is johnathan");
+        assert_eq!(rehydrated, "My name is johnathan");
+
+        // "john" should NOT rehydrate inside "myjohn"
+        let rehydrated = faker.rehydrate("myjohn");
+        assert_eq!(rehydrated, "myjohn");
+    }
+
+    #[test]
     fn test_no_custom_match_passes_through() {
         let faker = Faker::new(None, None);
-
         faker.add_custom_mapping("something", "else");
-
         let text = "This text has no matches";
         let rehydrated = faker.rehydrate(text);
         assert_eq!(rehydrated, text);
