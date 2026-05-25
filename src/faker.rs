@@ -69,13 +69,10 @@ impl FakerMaps {
             }
         }
 
-        // Apply custom pattern mappings (no minimum-length restriction)
+        // Apply custom pattern mappings (no minimum-length restriction,
+        // no boundary guards — user-defined patterns replace unconditionally)
         for (fake, original) in &self.custom_reverse {
-            if fake.chars().all(is_token_char) {
-                result = replace_token_bounded(&result, fake, original);
-            } else {
-                result = result.replace(fake, original);
-            }
+            result = result.replace(fake, original);
         }
 
         result
@@ -89,7 +86,7 @@ fn should_allow_rehydrate_mapping(fake: &str) -> bool {
 }
 
 fn is_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'
+    c.is_ascii_alphanumeric() || c == '_' || c == '.'
 }
 
 fn replace_token_bounded(input: &str, needle: &str, replacement: &str) -> String {
@@ -879,17 +876,29 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_pattern_prevents_midword_rehydration() {
+    fn test_custom_pattern_rehydrates_unconditional() {
         let faker = Faker::new(None, None);
         faker.add_custom_mapping("nathan", "john");
 
-        // "john" should NOT rehydrate inside "johnathan"
+        // "john" in midword rehydrates unconditionally (no boundary guards)
         let rehydrated = faker.rehydrate("My name is johnathan");
-        assert_eq!(rehydrated, "My name is johnathan");
+        assert_eq!(rehydrated, "My name is nathanathan");
 
-        // "john" should NOT rehydrate inside "myjohn"
+        // "john" at non-word start boundary
         let rehydrated = faker.rehydrate("myjohn");
-        assert_eq!(rehydrated, "myjohn");
+        assert_eq!(rehydrated, "mynathan");
+
+        // "john" followed by hyphen rehydrates
+        let rehydrated = faker.rehydrate("/home/john-test.txt");
+        assert_eq!(rehydrated, "/home/nathan-test.txt");
+
+        // "john" followed by period rehydrates
+        let rehydrated = faker.rehydrate("/home/john.test.txt");
+        assert_eq!(rehydrated, "/home/nathan.test.txt");
+
+        // "john" at end of path rehydrates
+        let rehydrated = faker.rehydrate("/home/john");
+        assert_eq!(rehydrated, "/home/nathan");
     }
 
     #[test]
